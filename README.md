@@ -4,7 +4,8 @@ This program is mostly coded with Anthropic Claude Sonnet 4.6!
 
 ---
 
-<img width="466" height="575" alt="{5AA6CFB6-3FEE-413A-8C76-E5C5A853A197}" src="https://github.com/user-attachments/assets/7cc9550f-f2df-445b-8e4e-3d2c3680cd43" />
+<img width="468" height="577" alt="{0BF11715-DE94-4AF1-B902-EC95B144BD77}" src="https://github.com/user-attachments/assets/558362fa-fe44-46d1-9bad-d46bb295ff8b" />
+
 
 ---
 
@@ -23,14 +24,15 @@ This is useful when certain applications sends data to other applications, in my
 
 See my personal routing here:
 
-<img width="878" height="898" alt="image" src="https://github.com/user-attachments/assets/977262d8-e020-4080-bf37-5372a2ca6a51" />
+![Uploading {0BF11715-DE94-4AF1-B902-EC95B144BD77}.png…]()
+
 
 
 ---
 ## Features
 
 - You are able to select Input and Output from all available sources to route to desired destination. 
-- The filter automatically activates once an Input and Output was set in the previous session!
+- The filter automatically activates once an Input and Output was set in the previous session! Everything you set up will be saved for the next session so you can start playing right away!
 <img width="441" height="230" alt="{A5A2ED73-2942-48F8-96FA-06F893397801}" src="https://github.com/user-attachments/assets/40799a53-7444-41e9-ae87-274c94739e22" />
 
 - Easily disable or enable the idividual filters by checking the boxes beside them
@@ -39,8 +41,9 @@ See my personal routing here:
 - You'll be able to see when data got filtered out in the activity log below.
 <img width="440" height="169" alt="{9D58AB50-1D12-4921-A5B2-2B1324E19E16}" src="https://github.com/user-attachments/assets/0aca00ee-8d8e-4dd7-bfd3-42f641317a7b" />
 
-- Easily start and stop the filter when needed.
-<img width="288" height="51" alt="{E66E0032-FCF5-4112-A787-954861D9FD78}" src="https://github.com/user-attachments/assets/0379049f-7e59-4499-94e8-e76b50ab9ecc" />
+- Easily start and stop the filter when needed. You can also refresh the device list whenever you connect something new!
+<img width="442" height="143" alt="image" src="https://github.com/user-attachments/assets/b32e890e-9e06-4ef2-be04-8f8f20325859" />
+
 
 ---
 ## Installation
