@@ -8,8 +8,6 @@ This program is mostly coded with Anthropic Claude Sonnet 4.6!
 
 ---
 
-
-
 This is a simple C# application that filters MIDI pedal controller messages from midi keyboards in real time.
 The program listens to incoming MIDI data and detects or removes common pedal inputs.
 
@@ -35,19 +33,20 @@ See my personal routing here:
 - The filter automatically activates once an Input and Output was set in the previous session!
 <img width="441" height="230" alt="{A5A2ED73-2942-48F8-96FA-06F893397801}" src="https://github.com/user-attachments/assets/40799a53-7444-41e9-ae87-274c94739e22" />
 
-- Easily disable or enable the ndividual filter by checking the boxes beside the pedal controllers
+- Easily disable or enable the idividual filters by checking the boxes beside them
 <img width="188" height="147" alt="{141ADEAA-16F6-47FA-B4E8-6093A165FCEC}" src="https://github.com/user-attachments/assets/6a7f27a6-db93-4b1c-9058-298f3b8cd9ff" />
 
 - You'll be able to see when data got filtered out in the activity log below.
 <img width="440" height="169" alt="{9D58AB50-1D12-4921-A5B2-2B1324E19E16}" src="https://github.com/user-attachments/assets/0aca00ee-8d8e-4dd7-bfd3-42f641317a7b" />
 
-- Easily start and stop the filter when needed
+- Easily start and stop the filter when needed.
 <img width="288" height="51" alt="{E66E0032-FCF5-4112-A787-954861D9FD78}" src="https://github.com/user-attachments/assets/0379049f-7e59-4499-94e8-e76b50ab9ecc" />
 
 ---
 ## Installation
 
 Simply download the MidiFilter.exe file and start it.
+I recommend putting it in a separate folder since it creates a settings.cfg file once an Input and Output device are set.
 
 You can also build the project on your own. For this .NET 8 is required.
 I provid you a small script which automatically builds it if you want to. It's called build.cmd. You need to place it in the root folder where the folder "files" is located.
