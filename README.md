@@ -19,12 +19,12 @@ The filter is <ins>currently</ins> controlling only pedal controllers:
 - Soft Pedal (CC 67)
 
 
-
 This is useful when certain applications sends data to other applications, in my case between Synthesia and Pianoteq, and affect the way you play.
 
 See my personal routing here:
 
-![Uploading {0BF11715-DE94-4AF1-B902-EC95B144BD77}.png…]()
+<img width="696" height="708" alt="{B7D15215-1901-4D88-9F04-62F1B6DDB316}" src="https://github.com/user-attachments/assets/4e46ae2d-4ade-4373-9ac0-15901c466cb4" />
+
 
 
 
