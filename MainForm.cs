@@ -15,11 +15,12 @@ public class MainForm : Form
     private readonly MidiFilterEngine _engine = new();
 
     // Controls
-    private ComboBox _cmbInput   = null!;
-    private ComboBox _cmbOutput  = null!;
-    private Button   _btnStart   = null!;
-    private Button   _btnStop    = null!;
-    private Panel    _statusDot  = null!;
+    private ComboBox _cmbInput    = null!;
+    private ComboBox _cmbOutput   = null!;
+    private Button   _btnStart    = null!;
+    private Button   _btnStop     = null!;
+    private Button   _btnRefresh  = null!;
+    private Panel    _statusDot   = null!;
     private Label    _statusLabel = null!;
     private ListBox  _logBox      = null!;
     private Label    _lblFiltered = null!;
@@ -41,6 +42,7 @@ public class MainForm : Form
     {
         BuildUI();
         PopulateDevices();
+        RestoreCheckboxStates();
         WireEvents();
 
         // Auto-start only if a previous device selection exists
@@ -57,7 +59,7 @@ public class MainForm : Form
     /// </summary>
     private void BuildUI()
     {
-        Text = "MidiFilter v1.0.0";
+        Text = "MidiFilter v1.1.1";
         Size = new Size(480, 580);
         MinimumSize = new Size(480, 580);
         FormBorderStyle = FormBorderStyle.FixedSingle;
@@ -72,7 +74,7 @@ public class MainForm : Form
         if (stream != null)
             Icon = new Icon(stream);
 
-        int pad = 16;
+        int pad = 18;
         int y   = pad;
 
         // --- Input ---
@@ -104,7 +106,7 @@ public class MainForm : Form
         y += _cmbOutput.Height + 16;
 
         // --- CC Filter Checkboxes ---
-        AddLabel("Filtered Pedals:", pad, y);
+        AddLabel("Filtered Controlers:", pad, y);
         y += 22;
 
         var filterPanel = new Panel
@@ -125,7 +127,7 @@ public class MainForm : Form
                 Left      = 10,
                 Top       = 8 + i * 28,
                 Width     = 400,
-                Checked   = true,
+                Checked   = true,          // default: all blocked
                 ForeColor = Color.FromArgb(130, 130, 230),
                 BackColor = Color.Transparent,
                 FlatStyle = FlatStyle.Flat,
@@ -135,13 +137,16 @@ public class MainForm : Form
             filterPanel.Controls.Add(cb);
         }
 
-        y += filterPanel.Height + 14;
+        y += filterPanel.Height + 10;
 
         // --- Buttons ---
+        const int btnGap   = 7;
+        const int btnW     = (428 - btnGap * 2) / 3;   // 138px each
+
         _btnStart = new Button
         {
             Text      = "Start",
-            Left      = pad, Top = y, Width = 130, Height = 36,
+            Left      = pad, Top = y, Width = btnW, Height = 36,
             BackColor = Color.FromArgb(40, 120, 40),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -153,7 +158,7 @@ public class MainForm : Form
         _btnStop = new Button
         {
             Text      = "Stop",
-            Left      = pad + 140, Top = y, Width = 130, Height = 36,
+            Left      = pad + btnW + btnGap, Top = y, Width = btnW, Height = 36,
             BackColor = Color.FromArgb(120, 40, 40),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -162,6 +167,21 @@ public class MainForm : Form
         };
         _btnStop.FlatAppearance.BorderColor = Color.FromArgb(160, 60, 60);
         Controls.Add(_btnStop);
+
+        _btnRefresh = new Button
+        {
+            Text      = "Refresh Devices",
+            Left      = pad + (btnW + btnGap) * 2, Top = y,
+            // last button stretches to fill any rounding remainder
+            Width     = 428 - (btnW + btnGap) * 2, Height = 36,
+            BackColor = Color.FromArgb(50, 80, 120),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font      = new Font("Segoe UI", 10f, FontStyle.Bold)
+        };
+        _btnRefresh.FlatAppearance.BorderColor = Color.FromArgb(70, 110, 160);
+        Controls.Add(_btnRefresh);
+
         y += 44;
 
         // --- Status bar ---
@@ -172,7 +192,7 @@ public class MainForm : Form
         };
         _statusDot = new Panel
         {
-            Left = 8, Top = 8, Width = 12, Height = 12,
+            Left = 8, Top = 8, Width = 13, Height = 13,
             BackColor = Color.Gray
         };
         MakeCircle(_statusDot);
@@ -212,6 +232,23 @@ public class MainForm : Form
     }
 
     /// <summary>
+    /// Loads saved CC checkbox states from disk and applies them to the UI.
+    /// Falls back to all-checked (default) if no setting is stored.
+    /// Called from constructor after BuildUI.
+    /// </summary>
+    private void RestoreCheckboxStates()
+    {
+        HashSet<int>? saved = AppSettings.LoadBlockedCCs();
+
+        // null means no entry in file — keep all checkboxes at their default (true)
+        if (saved == null)
+            return;
+
+        for (int i = 0; i < CC_DEFINITIONS.Length; i++)
+            _ccCheckboxes[i].Checked = saved.Contains(CC_DEFINITIONS[i].CC);
+    }
+
+    /// <summary>
     /// Reads current checkbox states and pushes the active CC set to the engine.
     /// Changes take effect immediately without restarting the filter.
     /// Called on checkbox change and on filter start.
@@ -225,6 +262,21 @@ public class MainForm : Form
                 active.Add(CC_DEFINITIONS[i].CC);
         }
         _engine.SetBlockedCCs(active);
+    }
+
+    /// <summary>
+    /// Collects current checkbox states into a HashSet of blocked CC numbers.
+    /// Called by OnStartClick to persist the selection.
+    /// </summary>
+    private HashSet<int> CollectBlockedCCs()
+    {
+        var result = new HashSet<int>();
+        for (int i = 0; i < CC_DEFINITIONS.Length; i++)
+        {
+            if (_ccCheckboxes[i].Checked)
+                result.Add(CC_DEFINITIONS[i].CC);
+        }
+        return result;
     }
 
     /// <summary>
@@ -320,9 +372,25 @@ public class MainForm : Form
     /// </summary>
     private void WireEvents()
     {
-        _btnStart.Click += OnStartClick;
-        _btnStop.Click  += OnStopClick;
-        FormClosing     += (_, _) => _engine.Stop();
+        _btnStart.Click   += OnStartClick;
+        _btnStop.Click    += OnStopClick;
+        _btnRefresh.Click += OnRefreshClick;
+        FormClosing       += (_, _) =>
+        {
+            _engine.Stop();
+
+            // Persist last device selection and CC filter state on every close
+            string inputName  = _cmbInput.SelectedItem  as string ?? string.Empty;
+            string outputName = _cmbOutput.SelectedItem as string ?? string.Empty;
+
+            if (!string.IsNullOrWhiteSpace(inputName)  && inputName.Trim()  != "-" &&
+                !string.IsNullOrWhiteSpace(outputName) && outputName.Trim() != "-")
+            {
+                AppSettings.Save(inputName, outputName);
+            }
+
+            AppSettings.SaveBlockedCCs(CollectBlockedCCs());
+        };
 
         // Live CC update on checkbox change — no restart needed
         foreach (var cb in _ccCheckboxes)
@@ -353,7 +421,7 @@ public class MainForm : Form
 
     /// <summary>
     /// Starts the filter engine with selected devices and current CC selection.
-    /// Saves the device selection to disk for next launch.
+    /// Saves device selection and blocked CC set to disk for next launch.
     /// Called when Start button is clicked, and automatically on app launch if saved devices exist.
     /// </summary>
     private void OnStartClick(object? sender, EventArgs e)
@@ -382,6 +450,7 @@ public class MainForm : Form
 
         ApplyCheckboxesToEngine();
         AppSettings.Save(inputName, outputName);
+        AppSettings.SaveBlockedCCs(CollectBlockedCCs());
         _engine.Start(inputName, outputName);
 
         _btnStart.Enabled  = false;
@@ -409,6 +478,16 @@ public class MainForm : Form
         MakeCircle(_statusDot);
         _statusLabel.Text = "Stopped";
         AddLog("Filter deactivated.");
+    }
+
+    /// <summary>
+    /// Refreshes the MIDI device lists in both combo boxes without interrupting a running filter.
+    /// Called when the Refresh button is clicked.
+    /// </summary>
+    private void OnRefreshClick(object? sender, EventArgs e)
+    {
+        PopulateDevices();
+        AddLog("Device list refreshed.");
     }
 
     /// <summary>
