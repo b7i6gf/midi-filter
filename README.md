@@ -4,28 +4,35 @@ This program is mostly coded with Anthropic Claude Sonnet 4.6!
 
 ---
 
-<img width="462" height="573" alt="{F5125355-6B46-446B-AE3C-874E8C11537F}" src="https://github.com/user-attachments/assets/c0b59aec-a8cd-4a68-888a-ecccc1e57e9e" />
+<img width="466" height="575" alt="{5AA6CFB6-3FEE-413A-8C76-E5C5A853A197}" src="https://github.com/user-attachments/assets/7cc9550f-f2df-445b-8e4e-3d2c3680cd43" />
+
+---
 
 
 
 This is a simple C# application that filters MIDI pedal controller messages from midi keyboards in real time.
 The program listens to incoming MIDI data and detects or removes common pedal inputs.
 
-The filter is currently controlling only pedal controllers:
+The filter is <ins>currently</ins> controlling only pedal controllers:
 - Sustain (CC 64)
 - Expression (CC 11)
 - Sostenuto (CC 66)
 - Soft Pedal (CC 67)
 
+
+
 This is useful when certain applications sends data to other applications, in my case between Synthesia and Pianoteq, and affect the way you play.
 
-See my routing here:
-<img width="542" height="778" alt="{2CDB769D-CA3F-458C-8F31-FD2CDA4FC320}" src="https://github.com/user-attachments/assets/bf2adf80-352b-4adf-a5ab-35b34cf99bb5" />
+See my personal routing here:
+
+<img width="878" height="898" alt="image" src="https://github.com/user-attachments/assets/977262d8-e020-4080-bf37-5372a2ca6a51" />
+
 
 ---
-# Features
+## Features
 
-- You are able to select Input and Output from all available sources to route to desired destination.
+- You are able to select Input and Output from all available sources to route to desired destination. 
+- The filter automatically activates once an Input and Output was set in the previous session!
 <img width="441" height="230" alt="{A5A2ED73-2942-48F8-96FA-06F893397801}" src="https://github.com/user-attachments/assets/40799a53-7444-41e9-ae87-274c94739e22" />
 
 - Easily disable or enable the ndividual filter by checking the boxes beside the pedal controllers
@@ -34,11 +41,11 @@ See my routing here:
 - You'll be able to see when data got filtered out in the activity log below.
 <img width="440" height="169" alt="{9D58AB50-1D12-4921-A5B2-2B1324E19E16}" src="https://github.com/user-attachments/assets/0aca00ee-8d8e-4dd7-bfd3-42f641317a7b" />
 
-
-- The filter automatically activates once an Input and Output was set in the previous session.
+- Easily start and stop the filter when needed
+<img width="288" height="51" alt="{E66E0032-FCF5-4112-A787-954861D9FD78}" src="https://github.com/user-attachments/assets/0379049f-7e59-4499-94e8-e76b50ab9ecc" />
 
 ---
-# Installation
+## Installation
 
 Simply download the MidiFilter.exe file and start it.
 
