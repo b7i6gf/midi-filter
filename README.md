@@ -56,3 +56,9 @@ I provid you a small script which automatically builds it if you want to. It's c
 
 Official Microsoft Link to the download page:
 https://dotnet.microsoft.com/en-us/download/dotnet/8.0
+
+---
+## Future Endeavours
+
+[] additional Filter for Volume Controller
+[] adding multiple custom filter to handle all Controllers needed
