@@ -262,7 +262,7 @@ public class MainForm : Form
         {
             Left      = 28, Top = 5, Width = 390, Height = 20,
             ForeColor = Color.Silver,
-            Text      = "Nicht gestartet"
+            Text      = "Not running"
         };
         statusPanel.Controls.Add(_statusDot);
         statusPanel.Controls.Add(_statusLabel);
