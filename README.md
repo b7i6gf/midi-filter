@@ -4,7 +4,8 @@ This program is mostly coded with Anthropic Claude Sonnet 4.6!
 
 ---
 
-<img width="468" height="577" alt="{0BF11715-DE94-4AF1-B902-EC95B144BD77}" src="https://github.com/user-attachments/assets/558362fa-fe44-46d1-9bad-d46bb295ff8b" />
+<img width="466" height="632" alt="{F1AB7424-AE46-46D0-96B9-EBB679604CDD}" src="https://github.com/user-attachments/assets/90af9abd-0890-42d6-9a5c-0859961e62ef" />
+
 
 
 ---
@@ -13,6 +14,7 @@ This is a simple C# application that filters MIDI pedal controller messages from
 The program listens to incoming MIDI data and detects or removes common pedal inputs.
 
 The filter is <ins>currently</ins> controlling only pedal controllers:
+- Volume (CC 7)
 - Sustain (CC 64)
 - Expression (CC 11)
 - Sostenuto (CC 66)
@@ -35,8 +37,8 @@ See my personal routing here:
 - The filter automatically activates once an Input and Output was set in the previous session! Everything you set up will be saved for the next session so you can start playing right away!
 <img width="441" height="230" alt="{A5A2ED73-2942-48F8-96FA-06F893397801}" src="https://github.com/user-attachments/assets/40799a53-7444-41e9-ae87-274c94739e22" />
 
-- Easily disable or enable the idividual filters by checking the boxes beside them
-<img width="188" height="147" alt="{141ADEAA-16F6-47FA-B4E8-6093A165FCEC}" src="https://github.com/user-attachments/assets/6a7f27a6-db93-4b1c-9058-298f3b8cd9ff" />
+- Easily disable or enable the idividual filters by checking the boxes beside them. Or all at once using the btton above.
+<img width="437" height="195" alt="{FEBBAF01-E175-4600-96FF-AC91754DC333}" src="https://github.com/user-attachments/assets/8277a28c-085a-4308-8088-c23262666c83" />
 
 - You'll be able to see when data got filtered out in the activity log below.
 <img width="440" height="169" alt="{9D58AB50-1D12-4921-A5B2-2B1324E19E16}" src="https://github.com/user-attachments/assets/0aca00ee-8d8e-4dd7-bfd3-42f641317a7b" />
@@ -60,5 +62,4 @@ https://dotnet.microsoft.com/en-us/download/dotnet/8.0
 ---
 ## Future Endeavours
 
-[] additional Filter for Volume Controller
 [] adding multiple custom filter to handle all Controllers needed
