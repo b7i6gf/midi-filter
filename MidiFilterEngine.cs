@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using NAudio.Midi;
 
@@ -13,26 +12,31 @@ namespace MidiFilter;
 /// </summary>
 public class MidiFilterEngine : IDisposable
 {
-    // CCs to block on all channels — updated at runtime via SetBlockedCCs
-    private volatile HashSet<int> _blockedCCs = new() { 11, 64, 66, 69 };
+    // CCs to block on all channels — replaced atomically via SetBlockedCCs.
+    // Volatile.Read/Write used instead of the 'volatile' keyword: 'volatile' on a
+    // reference type only guarantees visibility of the reference itself, not the
+    // object's contents. Volatile.Read/Write emits the correct memory barriers on
+    // all CLR implementations and makes the intent explicit.
+    private HashSet<int> _blockedCCs = new() { 11, 64, 66, 69 };
 
     /// <summary>
-    /// Replaces the active blocked CC set. Takes effect immediately on the next message.
-    /// Called by MainForm whenever a checkbox is toggled.
+    /// Atomically replaces the active blocked CC set. Takes effect on the next message.
+    /// Called by MainForm whenever a toggle button is clicked.
     /// </summary>
-    public void SetBlockedCCs(HashSet<int> ccs) => _blockedCCs = ccs;
+    public void SetBlockedCCs(HashSet<int> ccs) =>
+        Volatile.Write(ref _blockedCCs, ccs);
 
-    private MidiIn? _midiIn;
+    private MidiIn?  _midiIn;
     private MidiOut? _midiOut;
-    private Thread? _watcherThread;
+    private Thread?  _watcherThread;
     private volatile bool _running;
     private volatile bool _connected;
 
-    private string _inputName = string.Empty;
+    private string _inputName  = string.Empty;
     private string _outputName = string.Empty;
 
     public event Action<string>? StatusChanged;
-    public event Action<bool>? ConnectionChanged;
+    public event Action<bool>?   ConnectionChanged;
     public event Action<string>? MessageFiltered;
 
     public bool IsConnected => _connected;
@@ -44,14 +48,14 @@ public class MidiFilterEngine : IDisposable
     /// </summary>
     public void Start(string inputName, string outputName)
     {
-        _inputName = inputName;
+        _inputName  = inputName;
         _outputName = outputName;
-        _running = true;
+        _running    = true;
 
         _watcherThread = new Thread(WatchLoop)
         {
             IsBackground = true,
-            Name = "MidiFilterWatcher"
+            Name         = "MidiFilterWatcher"
         };
         _watcherThread.Start();
     }
@@ -75,9 +79,8 @@ public class MidiFilterEngine : IDisposable
         while (_running)
         {
             if (!_connected)
-            {
                 TryConnect();
-            }
+
             Thread.Sleep(1500);
         }
     }
@@ -91,7 +94,7 @@ public class MidiFilterEngine : IDisposable
     {
         try
         {
-            int inputId = FindDeviceId(_inputName, isInput: true);
+            int inputId  = FindDeviceId(_inputName,  isInput: true);
             int outputId = FindDeviceId(_outputName, isInput: false);
 
             if (inputId == -1)
@@ -109,9 +112,9 @@ public class MidiFilterEngine : IDisposable
             Disconnect();
 
             _midiOut = new MidiOut(outputId);
-            _midiIn = new MidiIn(inputId);
+            _midiIn  = new MidiIn(inputId);
             _midiIn.MessageReceived += OnMessageReceived;
-            _midiIn.ErrorReceived += OnErrorReceived;
+            _midiIn.ErrorReceived   += OnErrorReceived;
             _midiIn.Start();
 
             _connected = true;
@@ -134,13 +137,15 @@ public class MidiFilterEngine : IDisposable
         try
         {
             int status = e.RawMessage & 0xFF;
-            int type = status & 0xF0;
+            int type   = status & 0xF0;
 
-            // CC messages: status 0xB0-0xBF
+            // CC messages: status byte 0xB0–0xBF
             if (type == 0xB0)
             {
                 int cc = (e.RawMessage >> 8) & 0x7F;
-                if (_blockedCCs.Contains(cc))
+                // Volatile.Read ensures we always see the latest reference written
+                // by SetBlockedCCs, even across threads without a full lock.
+                if (Volatile.Read(ref _blockedCCs).Contains(cc))
                 {
                     MessageFiltered?.Invoke($"Blocked: CC{cc} (Channel {(status & 0x0F) + 1})");
                     return;
@@ -151,10 +156,10 @@ public class MidiFilterEngine : IDisposable
         }
         catch
         {
-            // Device was likely disconnected — trigger reconnect
+            // Device was likely disconnected — trigger reconnect cycle
             _connected = false;
             ConnectionChanged?.Invoke(false);
-            ReportStatus("Conection lost, reconnecting...");
+            ReportStatus("Connection lost, reconnecting...");
         }
     }
 
@@ -171,18 +176,24 @@ public class MidiFilterEngine : IDisposable
 
     /// <summary>
     /// Safely closes and disposes current MIDI in/out devices.
+    /// Guard against redundant calls: if already disconnected, exits immediately
+    /// to avoid firing ConnectionChanged multiple times for a single disconnect event.
     /// Called before reconnect attempts and on Stop.
     /// </summary>
     private void Disconnect()
     {
+        // Guard: skip if already in a disconnected state to prevent duplicate events
+        if (!_connected && _midiIn == null && _midiOut == null)
+            return;
+
         _connected = false;
         ConnectionChanged?.Invoke(false);
 
-        try { _midiIn?.Stop(); } catch { }
-        try { _midiIn?.Dispose(); } catch { }
-        try { _midiOut?.Dispose(); } catch { }
+        try { _midiIn?.Stop();    } catch (Exception ex) { ReportStatus($"MidiIn.Stop error: {ex.Message}"); }
+        try { _midiIn?.Dispose(); } catch (Exception ex) { ReportStatus($"MidiIn.Dispose error: {ex.Message}"); }
+        try { _midiOut?.Dispose();} catch (Exception ex) { ReportStatus($"MidiOut.Dispose error: {ex.Message}"); }
 
-        _midiIn = null;
+        _midiIn  = null;
         _midiOut = null;
     }
 
@@ -216,10 +227,7 @@ public class MidiFilterEngine : IDisposable
     /// Fires the StatusChanged event on the calling thread.
     /// Called throughout the engine to report state changes.
     /// </summary>
-    private void ReportStatus(string message)
-    {
-        StatusChanged?.Invoke(message);
-    }
+    private void ReportStatus(string message) => StatusChanged?.Invoke(message);
 
     /// <summary>
     /// Returns all currently available MIDI input device names.
@@ -245,8 +253,5 @@ public class MidiFilterEngine : IDisposable
         return list;
     }
 
-    public void Dispose()
-    {
-        Stop();
-    }
+    public void Dispose() => Stop();
 }
