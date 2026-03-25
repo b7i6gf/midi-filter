@@ -4,7 +4,7 @@ This program is mostly coded with Anthropic Claude Sonnet 4.6!
 
 ---
 
-<img width="466" height="632" alt="{F1AB7424-AE46-46D0-96B9-EBB679604CDD}" src="https://github.com/user-attachments/assets/90af9abd-0890-42d6-9a5c-0859961e62ef" />
+<img width="462" height="626" alt="{721B67CE-E6EF-4B51-87E0-F28FF4C0E6FB}" src="https://github.com/user-attachments/assets/04b3c14e-550c-4849-847f-19baf0963707" />
 
 
 
@@ -43,8 +43,9 @@ See my personal routing here:
 - You'll be able to see when data got filtered out in the activity log below.
 <img width="440" height="169" alt="{9D58AB50-1D12-4921-A5B2-2B1324E19E16}" src="https://github.com/user-attachments/assets/0aca00ee-8d8e-4dd7-bfd3-42f641317a7b" />
 
-- Easily start and stop the filter when needed. You can also refresh the device list whenever you connect something new!
-<img width="442" height="143" alt="image" src="https://github.com/user-attachments/assets/b32e890e-9e06-4ef2-be04-8f8f20325859" />
+- Easily start and stop the filter when needed. You can also refresh the device list whenever you connect something new or restart the app when something is off!
+<img width="446" height="132" alt="{573472A2-A87D-4C61-94E5-4C8F535A685A}" src="https://github.com/user-attachments/assets/efeb286a-3024-4348-92b8-908df7a79830" />
+
 
 
 ---
