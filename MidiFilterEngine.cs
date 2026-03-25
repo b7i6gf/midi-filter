@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using NAudio.Midi;
 
@@ -12,25 +13,25 @@ namespace MidiFilter;
 /// </summary>
 public class MidiFilterEngine : IDisposable
 {
-    // CCs to block on all channels — replaced atomically via SetBlockedCCs.
-    // Volatile.Read/Write used instead of the 'volatile' keyword: 'volatile' on a
-    // reference type only guarantees visibility of the reference itself, not the
-    // object's contents. Volatile.Read/Write emits the correct memory barriers on
-    // all CLR implementations and makes the intent explicit.
-    private HashSet<int> _blockedCCs = new() { 11, 64, 66, 69 };
+    // CCs to block on all channels - updated at runtime via SetBlockedCCs
+    private volatile HashSet<int> _blockedCCs = new() { 11, 64, 66, 69 };
 
     /// <summary>
-    /// Atomically replaces the active blocked CC set. Takes effect on the next message.
-    /// Called by MainForm whenever a toggle button is clicked.
+    /// Replaces the active blocked CC set. Takes effect immediately on the next message.
+    /// Called by MainForm whenever a checkbox is toggled.
     /// </summary>
-    public void SetBlockedCCs(HashSet<int> ccs) =>
-        Volatile.Write(ref _blockedCCs, ccs);
+    public void SetBlockedCCs(HashSet<int> ccs) => _blockedCCs = ccs;
 
     private MidiIn?  _midiIn;
     private MidiOut? _midiOut;
     private Thread?  _watcherThread;
     private volatile bool _running;
     private volatile bool _connected;
+
+    // Timestamp of the last failed TryConnect attempt.
+    // Used to enforce a cooldown before retrying after an error.
+    private DateTime _lastConnectError = DateTime.MinValue;
+    private static readonly TimeSpan ConnectErrorCooldown = TimeSpan.FromSeconds(4);
 
     private string _inputName  = string.Empty;
     private string _outputName = string.Empty;
@@ -44,13 +45,14 @@ public class MidiFilterEngine : IDisposable
     /// <summary>
     /// Starts the filter engine with the given input/output device names.
     /// Launches a background watcher thread that auto-reconnects on device loss.
-    /// Called from MainForm when user clicks Start.
+    /// Called from MainForm when user clicks Start or Restart.
     /// </summary>
     public void Start(string inputName, string outputName)
     {
-        _inputName  = inputName;
-        _outputName = outputName;
-        _running    = true;
+        _inputName        = inputName;
+        _outputName       = outputName;
+        _running          = true;
+        _lastConnectError = DateTime.MinValue;
 
         _watcherThread = new Thread(WatchLoop)
         {
@@ -62,7 +64,7 @@ public class MidiFilterEngine : IDisposable
 
     /// <summary>
     /// Stops the filter engine and disposes all MIDI resources.
-    /// Called from MainForm when user clicks Stop or closes the window.
+    /// Called from MainForm when user clicks Stop, Restart, or closes the window.
     /// </summary>
     public void Stop()
     {
@@ -72,14 +74,38 @@ public class MidiFilterEngine : IDisposable
 
     /// <summary>
     /// Background loop that continuously checks device availability and reconnects.
+    /// When connected, actively verifies the input device is still present in the OS
+    /// device list - catches the case where Synthesia closes silently without triggering
+    /// any NAudio error or message event.
+    /// Respects a cooldown after a connection error to avoid hammering a port that
+    /// Windows has not yet fully released (fixes "unspecifiedError calling midioutopen").
     /// Runs on _watcherThread.
     /// </summary>
     private void WatchLoop()
     {
         while (_running)
         {
-            if (!_connected)
-                TryConnect();
+            if (_connected)
+            {
+                // Active liveness check: verify the input device still exists in the OS.
+                // When Synthesia closes, its virtual MIDI port disappears from the device
+                // list even though NAudio raises no error - this catches that case.
+                if (FindDeviceId(_inputName, isInput: true) == -1)
+                {
+                    ReportStatus($"Input lost: \"{_inputName}\", reconnecting...");
+                    Disconnect();
+                }
+            }
+            else
+            {
+                // Enforce cooldown after an error so Windows has time to fully release
+                // the MIDI port before we attempt to open it again.
+                bool inCooldown = _lastConnectError != DateTime.MinValue
+                    && DateTime.UtcNow - _lastConnectError < ConnectErrorCooldown;
+
+                if (!inCooldown)
+                    TryConnect();
+            }
 
             Thread.Sleep(1500);
         }
@@ -87,6 +113,7 @@ public class MidiFilterEngine : IDisposable
 
     /// <summary>
     /// Attempts to find and open the configured input and output devices by name.
+    /// On exception, records the error timestamp to trigger the cooldown in WatchLoop.
     /// Reports status via StatusChanged event.
     /// Called by WatchLoop.
     /// </summary>
@@ -119,11 +146,12 @@ public class MidiFilterEngine : IDisposable
 
             _connected = true;
             ConnectionChanged?.Invoke(true);
-            ReportStatus($"Connected: \"{_inputName}\" → Filter → \"{_outputName}\"");
+            ReportStatus($"Connected: \"{_inputName}\" -> Filter -> \"{_outputName}\"");
         }
         catch (Exception ex)
         {
-            ReportStatus($"Connection Error: {ex.Message}");
+            _lastConnectError = DateTime.UtcNow;
+            ReportStatus($"Connection Error: {ex.Message} (retrying in {ConnectErrorCooldown.TotalSeconds}s...)");
             Disconnect();
         }
     }
@@ -139,13 +167,11 @@ public class MidiFilterEngine : IDisposable
             int status = e.RawMessage & 0xFF;
             int type   = status & 0xF0;
 
-            // CC messages: status byte 0xB0–0xBF
+            // CC messages: status 0xB0-0xBF
             if (type == 0xB0)
             {
                 int cc = (e.RawMessage >> 8) & 0x7F;
-                // Volatile.Read ensures we always see the latest reference written
-                // by SetBlockedCCs, even across threads without a full lock.
-                if (Volatile.Read(ref _blockedCCs).Contains(cc))
+                if (_blockedCCs.Contains(cc))
                 {
                     MessageFiltered?.Invoke($"Blocked: CC{cc} (Channel {(status & 0x0F) + 1})");
                     return;
@@ -156,7 +182,7 @@ public class MidiFilterEngine : IDisposable
         }
         catch
         {
-            // Device was likely disconnected — trigger reconnect cycle
+            // Device was likely disconnected - trigger reconnect
             _connected = false;
             ConnectionChanged?.Invoke(false);
             ReportStatus("Connection lost, reconnecting...");
@@ -176,22 +202,16 @@ public class MidiFilterEngine : IDisposable
 
     /// <summary>
     /// Safely closes and disposes current MIDI in/out devices.
-    /// Guard against redundant calls: if already disconnected, exits immediately
-    /// to avoid firing ConnectionChanged multiple times for a single disconnect event.
     /// Called before reconnect attempts and on Stop.
     /// </summary>
     private void Disconnect()
     {
-        // Guard: skip if already in a disconnected state to prevent duplicate events
-        if (!_connected && _midiIn == null && _midiOut == null)
-            return;
-
         _connected = false;
         ConnectionChanged?.Invoke(false);
 
-        try { _midiIn?.Stop();    } catch (Exception ex) { ReportStatus($"MidiIn.Stop error: {ex.Message}"); }
-        try { _midiIn?.Dispose(); } catch (Exception ex) { ReportStatus($"MidiIn.Dispose error: {ex.Message}"); }
-        try { _midiOut?.Dispose();} catch (Exception ex) { ReportStatus($"MidiOut.Dispose error: {ex.Message}"); }
+        try { _midiIn?.Stop();     } catch { }
+        try { _midiIn?.Dispose();  } catch { }
+        try { _midiOut?.Dispose(); } catch { }
 
         _midiIn  = null;
         _midiOut = null;
@@ -200,7 +220,7 @@ public class MidiFilterEngine : IDisposable
     /// <summary>
     /// Searches for a MIDI device by partial name match (case-insensitive).
     /// Returns device index or -1 if not found.
-    /// Called by TryConnect.
+    /// Called by TryConnect and WatchLoop.
     /// </summary>
     private static int FindDeviceId(string name, bool isInput)
     {
@@ -227,7 +247,10 @@ public class MidiFilterEngine : IDisposable
     /// Fires the StatusChanged event on the calling thread.
     /// Called throughout the engine to report state changes.
     /// </summary>
-    private void ReportStatus(string message) => StatusChanged?.Invoke(message);
+    private void ReportStatus(string message)
+    {
+        StatusChanged?.Invoke(message);
+    }
 
     /// <summary>
     /// Returns all currently available MIDI input device names.
@@ -253,5 +276,8 @@ public class MidiFilterEngine : IDisposable
         return list;
     }
 
-    public void Dispose() => Stop();
+    public void Dispose()
+    {
+        Stop();
+    }
 }

@@ -8,42 +8,37 @@ namespace MidiFilter;
 /// <summary>
 /// Main application window. Shows connection status, device selectors,
 /// per-pedal filter toggle buttons, and a live log of filtered messages.
-/// Entry point: Program.cs → Application.Run(new MainForm())
+/// Entry point: Program.cs -> Application.Run(new MainForm())
 /// </summary>
 public class MainForm : Form
 {
     private readonly MidiFilterEngine _engine = new();
 
     // Controls
-    private ComboBox   _cmbInput     = null!;
-    private ComboBox   _cmbOutput    = null!;
-    private Button     _btnStart     = null!;
-    private Button     _btnStop      = null!;
-    private Button     _btnRefresh   = null!;
-    private ClickPanel _btnToggleAll = null!;
-    private Panel      _statusDot    = null!;
-    private Label      _statusLabel  = null!;
-    private ListBox    _logBox       = null!;
-    private Label      _lblFiltered  = null!;
-    private int        _filteredCount = 0;
+    private ComboBox      _cmbInput     = null!;
+    private ComboBox      _cmbOutput    = null!;
+    private Button        _btnStart     = null!;
+    private Button        _btnStop      = null!;
+    private Button        _btnRestart   = null!;
+    private Button        _btnRefresh   = null!;
+    private ClickPanel    _btnToggleAll = null!;
+    private Panel         _statusDot    = null!;
+    private Label         _statusLabel  = null!;
+    private ListBox       _logBox       = null!;
+    private Label         _lblFiltered  = null!;
+    private int           _filteredCount = 0;
 
-    // Toggle buttons for each pedal CC — order matches CC_DEFINITIONS
+    // Toggle buttons for each pedal CC - order matches CC_DEFINITIONS
     private CcToggleButton[] _ccToggles = null!;
 
-    // Shared Font objects — created once, disposed with the form to prevent GDI leaks.
-    // These are assigned in BuildUI and reused across all controls that share the same style.
-    private readonly Font _fontUi      = new("Segoe UI",  9.5f);
-    private readonly Font _fontBold    = new("Segoe UI", 10f,  FontStyle.Bold);
-    private readonly Font _fontConsole = new("Consolas",  8.5f);
-
-    // CC number + display label — single source of truth for all pedal definitions
+    // CC number + display label - single source of truth for all pedal definitions
     private static readonly (int CC, string Label)[] CC_DEFINITIONS =
     {
-        ( 7, "CC7  — Volume Controller"),
-        (11, "CC11 — Soft Pedal"),
-        (64, "CC64 — Sustain Pedal"),
-        (66, "CC66 — Sostenuto Pedal"),
-        (69, "CC69 — Harmonic Pedal"),
+        ( 7, "CC7  - Volume Controller"),
+        (11, "CC11 - Soft Pedal"),
+        (64, "CC64 - Sustain Pedal"),
+        (66, "CC66 - Sostenuto Pedal"),
+        (69, "CC69 - Harmonic Pedal"),
     };
 
     public MainForm()
@@ -62,8 +57,8 @@ public class MainForm : Form
     }
 
     // -------------------------------------------------------------------------
-    // CcToggleButton — self-contained button that tracks its own on/off state.
-    // Displays ✕ (active/blocked) or ○ (inactive) with the CC label.
+    // CcToggleButton - self-contained button that tracks its own on/off state.
+    // Displays O (active/blocked) or X (inactive) with the CC label.
     // Called by BuildUI; state read by ApplyTogglesToEngine and CollectBlockedCCs.
     // -------------------------------------------------------------------------
     private sealed class CcToggleButton : Button
@@ -80,7 +75,7 @@ public class MainForm : Form
             }
         }
 
-        public CcToggleButton(string label, Font sharedFont)
+        public CcToggleButton(string label)
         {
             _active   = true;
             Tag       = label;
@@ -92,10 +87,7 @@ public class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft;
             Padding   = new Padding(6, 0, 0, 0);
             Cursor    = Cursors.Hand;
-            // Use the shared font — do NOT set Font = new Font(...) here,
-            // as Button.Dispose would not dispose a font it did not create,
-            // and we manage the lifetime centrally in MainForm.
-            Font = sharedFont;
+            Font      = new Font("Segoe UI", 9.5f);
             UpdateAppearance();
 
             Click += (_, _) => Active = !_active;
@@ -105,28 +97,26 @@ public class MainForm : Form
         {
             Text      = _active ? $"○   {Tag}" : $"✕   {Tag}";
             BackColor = _active
-                ? Color.FromArgb(55, 50, 80)    // active: subtle purple tint
-                : Color.FromArgb(45, 45, 45);   // inactive: neutral dark
+                ? Color.FromArgb(55, 50, 80)     // active: subtle purple tint
+                : Color.FromArgb(45, 45, 45);    // inactive: neutral dark
             ForeColor = _active
-                ? Color.FromArgb(160, 140, 255) // active: bright purple
-                : Color.FromArgb(100, 100, 100);// inactive: dimmed
+                ? Color.FromArgb(160, 140, 255)  // active: bright purple
+                : Color.FromArgb(100, 100, 100); // inactive: dimmed
         }
     }
 
     /// <summary>
     /// Constructs all UI controls programmatically.
-    /// Shared Font fields (_fontUi, _fontBold, _fontConsole) are reused here
-    /// instead of allocating new Font instances per control.
     /// Called from constructor.
     /// </summary>
     private void BuildUI()
     {
-        Text            = "MidiFilter v1.2.0";
+        Text            = "MidiFilter v1.3.0";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox     = false;
         BackColor       = Color.FromArgb(30, 30, 30);
         ForeColor       = Color.WhiteSmoke;
-        Font            = _fontUi;
+        Font            = new Font("Segoe UI", 9.5f);
         StartPosition   = FormStartPosition.CenterScreen;
 
         using var stream = typeof(MainForm).Assembly
@@ -142,7 +132,7 @@ public class MainForm : Form
         y += 22;
         _cmbInput = new ComboBox
         {
-            Left          = pad, Top = y, Width = 428,
+            Left = pad, Top = y, Width = 428,
             DropDownStyle = ComboBoxStyle.DropDownList,
             BackColor     = Color.FromArgb(50, 50, 50),
             ForeColor     = Color.WhiteSmoke,
@@ -156,7 +146,7 @@ public class MainForm : Form
         y += 22;
         _cmbOutput = new ComboBox
         {
-            Left          = pad, Top = y, Width = 428,
+            Left = pad, Top = y, Width = 428,
             DropDownStyle = ComboBoxStyle.DropDownList,
             BackColor     = Color.FromArgb(50, 50, 50),
             ForeColor     = Color.WhiteSmoke,
@@ -190,7 +180,7 @@ public class MainForm : Form
         _ccToggles = new CcToggleButton[CC_DEFINITIONS.Length];
         for (int i = 0; i < CC_DEFINITIONS.Length; i++)
         {
-            var tb = new CcToggleButton(CC_DEFINITIONS[i].Label, _fontUi)
+            var tb = new CcToggleButton(CC_DEFINITIONS[i].Label)
             {
                 Left  = 6,
                 Top   = 6 + i * 30,
@@ -202,9 +192,15 @@ public class MainForm : Form
 
         y += filterPanel.Height + 14;
 
-        // --- Buttons ---
+        // --- Buttons: Start | Stop | Restart App | Refresh Devices (4 equal slots) ---
         const int btnGap = 7;
-        const int btnW   = (428 - btnGap * 2) / 3; // 138px each
+        // Total space: 428px, 3 gaps of 7px = 21px, remaining 407px split into 4
+        const int totalW   = 428;
+        const int btnW     = (totalW - btnGap * 3) / 4;   // ~101px each
+        // Last button takes remaining pixels to avoid rounding gap
+        const int lastBtnW = totalW - (btnW + btnGap) * 3;
+        // Two-line buttons use a smaller font and explicit line break
+        var twoLineFont = new Font("Segoe UI", 8f, FontStyle.Bold);
 
         _btnStart = new Button
         {
@@ -213,7 +209,7 @@ public class MainForm : Form
             BackColor = Color.FromArgb(40, 120, 40),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Font      = _fontBold
+            Font      = new Font("Segoe UI", 10f, FontStyle.Bold)
         };
         _btnStart.FlatAppearance.BorderColor = Color.FromArgb(60, 160, 60);
         Controls.Add(_btnStart);
@@ -221,28 +217,45 @@ public class MainForm : Form
         _btnStop = new Button
         {
             Text      = "Stop",
-            Left      = pad + btnW + btnGap, Top = y, Width = btnW, Height = 36,
+            Left      = pad + (btnW + btnGap), Top = y, Width = btnW, Height = 36,
             BackColor = Color.FromArgb(120, 40, 40),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Font      = _fontBold,
+            Font      = new Font("Segoe UI", 10f, FontStyle.Bold),
             Enabled   = false
         };
         _btnStop.FlatAppearance.BorderColor = Color.FromArgb(160, 60, 60);
         Controls.Add(_btnStop);
 
+        // Slot 2: Refresh Devices - blue, two-line text
         _btnRefresh = new Button
         {
-            Text      = "Refresh",
-            Left      = pad + (btnW + btnGap) * 2, Top = y,
-            Width     = 428 - (btnW + btnGap) * 2, Height = 36,
+            Text      = "Refresh\nDevices",
+            Left      = pad + (btnW + btnGap) * 2, Top = y, Width = btnW, Height = 36,
             BackColor = Color.FromArgb(50, 80, 120),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Font      = _fontBold
+            Font      = twoLineFont
         };
-        _btnRefresh.FlatAppearance.BorderColor = Color.FromArgb(70, 110, 160);
+        _btnRefresh.FlatAppearance.BorderColor        = Color.FromArgb(70, 110, 160);
+        _btnRefresh.FlatAppearance.MouseOverBackColor = Color.FromArgb(65, 100, 145);
+        _btnRefresh.FlatAppearance.MouseDownBackColor = Color.FromArgb(40, 65, 100);
         Controls.Add(_btnRefresh);
+
+        // Slot 3: Restart App - dark grey, two-line text, always enabled
+        _btnRestart = new Button
+        {
+            Text      = "Restart\nApp",
+            Left      = pad + (btnW + btnGap) * 3, Top = y, Width = lastBtnW, Height = 36,
+            BackColor = Color.FromArgb(65, 65, 65),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font      = twoLineFont
+        };
+        _btnRestart.FlatAppearance.BorderColor        = Color.FromArgb(95, 95, 95);
+        _btnRestart.FlatAppearance.MouseOverBackColor = Color.FromArgb(80, 80, 80);
+        _btnRestart.FlatAppearance.MouseDownBackColor = Color.FromArgb(50, 50, 50);
+        Controls.Add(_btnRestart);
 
         y += 44;
 
@@ -254,15 +267,15 @@ public class MainForm : Form
         };
         _statusDot = new Panel
         {
-            Left      = 8, Top = 8, Width = 13, Height = 13,
+            Left = 8, Top = 8, Width = 13, Height = 13,
             BackColor = Color.Gray
         };
         MakeCircle(_statusDot);
         _statusLabel = new Label
         {
-            Left      = 28, Top = 5, Width = 390, Height = 20,
+            Left = 28, Top = 5, Width = 390, Height = 20,
             ForeColor = Color.Silver,
-            Text      = "Not running"
+            Text      = "Nor running"
         };
         statusPanel.Controls.Add(_statusDot);
         statusPanel.Controls.Add(_statusLabel);
@@ -278,7 +291,7 @@ public class MainForm : Form
             BackColor     = Color.FromArgb(20, 20, 20),
             ForeColor     = Color.FromArgb(100, 220, 100),
             BorderStyle   = BorderStyle.FixedSingle,
-            Font          = _fontConsole,
+            Font          = new Font("Consolas", 8.5f),
             SelectionMode = SelectionMode.None
         };
         Controls.Add(_logBox);
@@ -293,7 +306,7 @@ public class MainForm : Form
         Controls.Add(_lblFiltered);
         y += 24;
 
-        // Auto-size form height to fit all content — adapts when filters are added
+        // Auto-size form height to fit all content
         int formHeight = y + pad + (Height - ClientSize.Height);
         Size        = new Size(480, formHeight);
         MinimumSize = new Size(480, formHeight);
@@ -308,7 +321,7 @@ public class MainForm : Form
     {
         HashSet<int>? saved = AppSettings.LoadBlockedCCs();
 
-        // null means no entry in file — keep all toggles at their default (active)
+        // null means no entry in file - keep all toggles at their default (active)
         if (saved == null)
             return;
 
@@ -351,7 +364,7 @@ public class MainForm : Form
 
     /// <summary>
     /// Toggles all CC buttons to the opposite of their current combined state.
-    /// If all are active, turns all off — otherwise turns all on.
+    /// If all are active, turns all off - otherwise turns all on.
     /// Called when the All-toggle button is clicked.
     /// </summary>
     private void OnToggleAllClick(object? sender, EventArgs e)
@@ -394,7 +407,7 @@ public class MainForm : Form
 
     /// <summary>
     /// Makes a panel appear circular by overriding its region.
-    /// Called by BuildUI for the status dot, and by WireEvents/OnStopClick on color change.
+    /// Called by BuildUI for the status dot.
     /// </summary>
     private static void MakeCircle(Panel p)
     {
@@ -473,6 +486,7 @@ public class MainForm : Form
     {
         _btnStart.Click       += OnStartClick;
         _btnStop.Click        += OnStopClick;
+        _btnRestart.Click     += OnRestartClick;
         _btnRefresh.Click     += OnRefreshClick;
         _btnToggleAll.Clicked += OnToggleAllClick;
 
@@ -493,7 +507,7 @@ public class MainForm : Form
             AppSettings.SaveBlockedCCs(CollectBlockedCCs());
         };
 
-        // Live CC update on toggle click — no restart needed
+        // Live CC update on toggle click - no restart needed
         foreach (var tb in _ccToggles)
             tb.Click += (_, _) =>
             {
@@ -563,7 +577,7 @@ public class MainForm : Form
         _cmbInput.Enabled  = false;
         _cmbOutput.Enabled = false;
 
-        AddLog($"Filter activated: {inputName} → {outputName}");
+        AddLog($"Filter activated: {inputName} -> {outputName}");
     }
 
     /// <summary>
@@ -583,6 +597,26 @@ public class MainForm : Form
         MakeCircle(_statusDot);
         _statusLabel.Text = "Stopped";
         AddLog("Filter deactivated.");
+    }
+
+    /// <summary>
+    /// Fully restarts the filter engine with the current device selection.
+    /// Equivalent to clicking Stop then Start - resets all state including
+    /// the error cooldown, so a manual restart always attempts to connect immediately.
+    /// Called when Restart button is clicked.
+    /// </summary>
+    private void OnRestartClick(object? sender, EventArgs e)
+    {
+        _engine.Stop();
+
+        _statusDot.BackColor = Color.Gray;
+        MakeCircle(_statusDot);
+        _statusLabel.Text = "Restarting...";
+        AddLog(">>>>  App restart triggered  <<<<");
+
+        // Reuse OnStartClick - it validates devices, resets counters, and starts the engine
+        OnStartClick(sender, e);
+        AddLog(">>>>  App restart complete   <<<<");
     }
 
     /// <summary>
@@ -618,25 +652,9 @@ public class MainForm : Form
         else action();
     }
 
-    /// <summary>
-    /// Disposes managed resources including shared Font objects.
-    /// Called by WinForms when the form is closed.
-    /// </summary>
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            _engine.Dispose();
-            _fontUi.Dispose();
-            _fontBold.Dispose();
-            _fontConsole.Dispose();
-        }
-        base.Dispose(disposing);
-    }
-
 // ---------------------------------------------------------------------------
-// ClickPanel — owner-drawn panel that behaves like a button.
-// Text is always drawn centered via GDI+ — immune to WinForms pressed-state
+// ClickPanel - owner-drawn panel that behaves like a button.
+// Text is always drawn centered via GDI+ - immune to WinForms pressed-state
 // text offset that affects standard Button controls.
 // Used for _btnToggleAll in MainForm.
 // ---------------------------------------------------------------------------
@@ -646,16 +664,6 @@ internal sealed class ClickPanel : Panel
     private static readonly Color _bgHover   = Color.FromArgb(60,  95, 140);
     private static readonly Color _bgPressed = Color.FromArgb(40,  65, 100);
     private static readonly Color _border    = Color.FromArgb(70, 110, 160);
-
-    // Shared paint resources — created once, never reallocated during painting.
-    // Disposed in Dispose(bool) to avoid per-paint GDI allocations.
-    private readonly Font        _paintFont   = new("Segoe UI", 8f, FontStyle.Bold);
-    private readonly SolidBrush  _paintBrush  = new(Color.White);
-    private readonly StringFormat _paintFormat = new()
-    {
-        Alignment     = StringAlignment.Center,
-        LineAlignment = StringAlignment.Center
-    };
 
     private string _label;
     private bool   _hover;
@@ -685,7 +693,7 @@ internal sealed class ClickPanel : Panel
         var g    = e.Graphics;
         var rect = ClientRectangle;
 
-        // Background — use static color directly to avoid per-paint Brush allocation
+        // Background
         Color bg = _pressed ? _bgPressed : _hover ? _bgHover : _bgNormal;
         using (var brush = new SolidBrush(bg))
             g.FillRectangle(brush, rect);
@@ -694,8 +702,15 @@ internal sealed class ClickPanel : Panel
         using (var pen = new Pen(_border))
             g.DrawRectangle(pen, 0, 0, rect.Width - 1, rect.Height - 1);
 
-        // Text — always centered, never offset; reuse pre-allocated resources
-        g.DrawString(_label, _paintFont, _paintBrush, rect, _paintFormat);
+        // Text - always centered, never offset
+        using var font   = new Font("Segoe UI", 8f, FontStyle.Bold);
+        using var brush2 = new SolidBrush(Color.White);
+        var fmt = new StringFormat
+        {
+            Alignment     = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center
+        };
+        g.DrawString(_label, font, brush2, rect, fmt);
     }
 
     protected override void OnMouseEnter(EventArgs e) { _hover   = true;  Invalidate(); base.OnMouseEnter(e); }
@@ -708,21 +723,6 @@ internal sealed class ClickPanel : Panel
         if (ClientRectangle.Contains(e.Location))
             Clicked?.Invoke(this, EventArgs.Empty);
         base.OnMouseUp(e);
-    }
-
-    /// <summary>
-    /// Disposes GDI paint resources allocated by this panel.
-    /// Called by WinForms when the control is destroyed.
-    /// </summary>
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            _paintFont.Dispose();
-            _paintBrush.Dispose();
-            _paintFormat.Dispose();
-        }
-        base.Dispose(disposing);
     }
 }
 

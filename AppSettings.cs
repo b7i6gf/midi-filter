@@ -1,23 +1,26 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace MidiFilter;
 
 /// <summary>
-/// Reads and writes persistent user settings (last selected MIDI devices)
-/// to a simple key=value file in %AppData%\MidiFilter\settings.cfg.
+/// Reads and writes persistent user settings (last selected MIDI devices and filter options)
+/// to a simple key=value file next to the executable (settings.cfg).
 /// Called by MainForm on startup and when the user starts the filter.
 /// </summary>
 internal static class AppSettings
 {
     private static readonly string SettingsDir =
-    AppContext.BaseDirectory;
+        AppContext.BaseDirectory;
 
     private static readonly string SettingsFile =
         Path.Combine(SettingsDir, "settings.cfg");
 
-    private const string KeyInput  = "LastInput";
-    private const string KeyOutput = "LastOutput";
+    private const string KeyInput      = "LastInput";
+    private const string KeyOutput     = "LastOutput";
+    private const string KeyBlockedCCs = "BlockedCCs";
 
     /// <summary>
     /// Returns the last saved MIDI input device name, or null if none saved.
@@ -32,6 +35,26 @@ internal static class AppSettings
     public static string? LoadOutput() => Read(KeyOutput);
 
     /// <summary>
+    /// Returns the saved set of blocked CC numbers, or null if no entry exists in the file.
+    /// A null return means the caller should apply its own default (all CCs blocked).
+    /// Called by MainForm on startup to restore checkbox states.
+    /// </summary>
+    public static HashSet<int>? LoadBlockedCCs()
+    {
+        string? raw = Read(KeyBlockedCCs);
+        if (raw == null)
+            return null;
+
+        var result = new HashSet<int>();
+        foreach (string part in raw.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (int.TryParse(part.Trim(), out int cc))
+                result.Add(cc);
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Persists the selected input and output device names to disk.
     /// Called by MainForm.OnStartClick when the user starts the filter.
     /// </summary>
@@ -39,6 +62,16 @@ internal static class AppSettings
     {
         Write(KeyInput,  inputName);
         Write(KeyOutput, outputName);
+    }
+
+    /// <summary>
+    /// Persists the currently blocked CC numbers as a comma-separated list.
+    /// Called by MainForm.OnStartClick when the user starts the filter.
+    /// </summary>
+    public static void SaveBlockedCCs(HashSet<int> blockedCCs)
+    {
+        string value = string.Join(",", blockedCCs.OrderBy(x => x));
+        Write(KeyBlockedCCs, value);
     }
 
     /// <summary>
@@ -78,7 +111,7 @@ internal static class AppSettings
             : Array.Empty<string>();
 
         bool found = false;
-        var lines = new System.Collections.Generic.List<string>();
+        var lines = new List<string>();
 
         foreach (string line in existing)
         {
