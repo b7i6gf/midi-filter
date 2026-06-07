@@ -7,13 +7,16 @@ using NAudio.Midi;
 namespace MidiFilter;
 
 /// <summary>
-/// Core MIDI filter engine. Reads from a named MIDI input, filters specified CCs,
-/// and forwards all other messages to a named MIDI output.
+/// Core MIDI filter engine. Reads from a named MIDI input, filters specified CCs
+/// and notes (individually or all notes at once), and forwards all other messages
+/// to a named MIDI output.
 /// Called by MainForm to start/stop filtering and receive status updates.
 /// </summary>
 public class MidiFilterEngine : IDisposable
 {
-    // CCs to block on all channels - updated at runtime via SetBlockedCCs
+    // CCs to block on all channels - updated at runtime via SetBlockedCCs.
+    // The set is swapped atomically (never mutated in place), so a volatile
+    // reference read is enough for the MIDI thread to see the latest set.
     private volatile HashSet<int> _blockedCCs = new() { 11, 64, 66, 69 };
 
     /// <summary>
@@ -22,16 +25,55 @@ public class MidiFilterEngine : IDisposable
     /// </summary>
     public void SetBlockedCCs(HashSet<int> ccs) => _blockedCCs = ccs;
 
+    // Note numbers to block on all channels (Note On and Note Off), swapped atomically.
+    private volatile HashSet<int> _blockedNotes = new();
+
+    // When true, every note message is blocked regardless of _blockedNotes.
+    private volatile bool _blockAllNotes;
+
+    /// <summary>
+    /// Replaces the active blocked-note set. Takes effect on the next message.
+    /// Called by MainForm whenever a note filter is toggled.
+    /// </summary>
+    public void SetBlockedNotes(HashSet<int> notes) => _blockedNotes = notes;
+
+    /// <summary>
+    /// Enables or disables blocking of all note messages.
+    /// Called by MainForm when the "All Notes" filter is toggled.
+    /// </summary>
+    public void SetBlockAllNotes(bool value) => _blockAllNotes = value;
+
     private MidiIn?  _midiIn;
     private MidiOut? _midiOut;
     private Thread?  _watcherThread;
     private volatile bool _running;
     private volatile bool _connected;
 
+    // Signals the watcher thread to wake immediately, so Stop does not have to wait
+    // out the full poll interval before the thread can exit and be joined.
+    private readonly ManualResetEventSlim _wakeSignal = new(false);
+
+    // Running total of filtered messages. Incremented on the MIDI thread without any
+    // allocation or UI marshaling, and read by MainForm on a UI timer.
+    private long _filteredCount;
+    public long FilteredCount => Interlocked.Read(ref _filteredCount);
+
+    // Time-based gate for log lines: at most one logged message per LogMinIntervalMs,
+    // independent of message rate. Keeps the log readable and the UI cheap when a high
+    // volume of notes is filtered (for example with All Notes enabled). The counter
+    // above stays exact regardless of this gate.
+    private long _lastLogTick;
+    private const long LogMinIntervalMs = 150;
+
+    // Note names in Pianoteq style (flats), with C4 = note 60 and range C-1 to G9.
+    private static readonly string[] NoteNames =
+        { "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B" };
+
     // Timestamp of the last failed TryConnect attempt.
     // Used to enforce a cooldown before retrying after an error.
     private DateTime _lastConnectError = DateTime.MinValue;
     private static readonly TimeSpan ConnectErrorCooldown = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan PollInterval         = TimeSpan.FromMilliseconds(1500);
 
     private string _inputName  = string.Empty;
     private string _outputName = string.Empty;
@@ -49,10 +91,19 @@ public class MidiFilterEngine : IDisposable
     /// </summary>
     public void Start(string inputName, string outputName)
     {
+        // Ensure any previous run is fully stopped (and its thread joined) before
+        // starting a new one, so we never end up with two watcher threads sharing
+        // the device fields. This fixes the duplicate-thread leak on Restart.
+        Stop();
+
         _inputName        = inputName;
         _outputName       = outputName;
-        _running          = true;
         _lastConnectError = DateTime.MinValue;
+        Interlocked.Exchange(ref _filteredCount, 0);
+        _lastLogTick = 0;
+
+        _wakeSignal.Reset();
+        _running = true;
 
         _watcherThread = new Thread(WatchLoop)
         {
@@ -63,12 +114,20 @@ public class MidiFilterEngine : IDisposable
     }
 
     /// <summary>
-    /// Stops the filter engine and disposes all MIDI resources.
+    /// Stops the filter engine, waits for the watcher thread to exit, then disposes
+    /// all MIDI resources. Safe to call repeatedly.
     /// Called from MainForm when user clicks Stop, Restart, or closes the window.
     /// </summary>
     public void Stop()
     {
         _running = false;
+        _wakeSignal.Set();
+
+        Thread? t = _watcherThread;
+        if (t != null && t.IsAlive)
+            t.Join(TimeSpan.FromSeconds(5));
+        _watcherThread = null;
+
         Disconnect();
     }
 
@@ -107,7 +166,8 @@ public class MidiFilterEngine : IDisposable
                     TryConnect();
             }
 
-            Thread.Sleep(1500);
+            // Wait until the next poll, but wake immediately when Stop signals.
+            _wakeSignal.Wait(PollInterval);
         }
     }
 
@@ -144,8 +204,7 @@ public class MidiFilterEngine : IDisposable
             _midiIn.ErrorReceived   += OnErrorReceived;
             _midiIn.Start();
 
-            _connected = true;
-            ConnectionChanged?.Invoke(true);
+            SetConnected(true);
             ReportStatus($"Connected: \"{_inputName}\" -> Filter -> \"{_outputName}\"");
         }
         catch (Exception ex)
@@ -157,15 +216,19 @@ public class MidiFilterEngine : IDisposable
     }
 
     /// <summary>
-    /// Handles incoming MIDI messages. Filters blocked CCs, forwards everything else.
+    /// Handles incoming MIDI messages. Filters blocked CCs and notes (or all notes),
+    /// forwards everything else. Runs on the MIDI thread, so the path stays allocation
+    /// free: it only counts via Interlocked and builds a log string when the time gate
+    /// in ShouldLog allows it.
     /// Called by NAudio on MIDI message receipt.
     /// </summary>
     private void OnMessageReceived(object? sender, MidiInMessageEventArgs e)
     {
         try
         {
-            int status = e.RawMessage & 0xFF;
-            int type   = status & 0xF0;
+            int status  = e.RawMessage & 0xFF;
+            int type    = status & 0xF0;
+            int channel = (status & 0x0F) + 1;
 
             // CC messages: status 0xB0-0xBF
             if (type == 0xB0)
@@ -173,7 +236,21 @@ public class MidiFilterEngine : IDisposable
                 int cc = (e.RawMessage >> 8) & 0x7F;
                 if (_blockedCCs.Contains(cc))
                 {
-                    MessageFiltered?.Invoke($"Blocked: CC{cc} (Channel {(status & 0x0F) + 1})");
+                    Interlocked.Increment(ref _filteredCount);
+                    if (ShouldLog())
+                        MessageFiltered?.Invoke($"Blocked: CC{cc} (Channel {channel})");
+                    return;
+                }
+            }
+            // Note On (0x90-0x9F) and Note Off (0x80-0x8F); Note On velocity 0 is covered.
+            else if (type == 0x90 || type == 0x80)
+            {
+                int note = (e.RawMessage >> 8) & 0x7F;
+                if (_blockAllNotes || _blockedNotes.Contains(note))
+                {
+                    Interlocked.Increment(ref _filteredCount);
+                    if (ShouldLog())
+                        MessageFiltered?.Invoke($"Blocked: Note {note} ({NoteName(note)}) (Channel {channel})");
                     return;
                 }
             }
@@ -182,11 +259,35 @@ public class MidiFilterEngine : IDisposable
         }
         catch
         {
-            // Device was likely disconnected - trigger reconnect
-            _connected = false;
-            ConnectionChanged?.Invoke(false);
+            // Device was likely disconnected - trigger reconnect.
+            SetConnected(false);
             ReportStatus("Connection lost, reconnecting...");
         }
+    }
+
+    /// <summary>
+    /// Time gate for log output: returns true at most once per LogMinIntervalMs.
+    /// Keeps the activity log and UI cheap under heavy filtering. Uses a monotonic
+    /// millisecond tick, so it never allocates.
+    /// Called from OnMessageReceived on the MIDI thread.
+    /// </summary>
+    private bool ShouldLog()
+    {
+        long now = Environment.TickCount64;
+        if (now - _lastLogTick < LogMinIntervalMs)
+            return false;
+        _lastLogTick = now;
+        return true;
+    }
+
+    /// <summary>
+    /// Returns the Pianoteq-style note name for a MIDI note number (for example 60 to "C4").
+    /// Called from OnMessageReceived for note log lines, and by MainForm for filter labels.
+    /// </summary>
+    public static string NoteName(int note)
+    {
+        int octave = note / 12 - 1;
+        return NoteNames[note % 12] + octave;
     }
 
     /// <summary>
@@ -195,9 +296,21 @@ public class MidiFilterEngine : IDisposable
     /// </summary>
     private void OnErrorReceived(object? sender, MidiInMessageEventArgs e)
     {
-        _connected = false;
-        ConnectionChanged?.Invoke(false);
+        SetConnected(false);
         ReportStatus("MIDI Error, reconnecting...");
+    }
+
+    /// <summary>
+    /// Updates the connection flag and raises ConnectionChanged only on an actual
+    /// state transition, avoiding redundant UI updates during reconnect polling.
+    /// Called from TryConnect, Disconnect, and the MIDI callbacks.
+    /// </summary>
+    private void SetConnected(bool value)
+    {
+        if (_connected == value)
+            return;
+        _connected = value;
+        ConnectionChanged?.Invoke(value);
     }
 
     /// <summary>
@@ -206,8 +319,7 @@ public class MidiFilterEngine : IDisposable
     /// </summary>
     private void Disconnect()
     {
-        _connected = false;
-        ConnectionChanged?.Invoke(false);
+        SetConnected(false);
 
         try { _midiIn?.Stop();     } catch { }
         try { _midiIn?.Dispose();  } catch { }
@@ -279,5 +391,6 @@ public class MidiFilterEngine : IDisposable
     public void Dispose()
     {
         Stop();
+        _wakeSignal.Dispose();
     }
 }
