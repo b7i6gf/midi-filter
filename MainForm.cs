@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
@@ -30,22 +31,38 @@ public class MainForm : Form
     private Label      _statusLabel  = null!;
     private ListBox    _logBox       = null!;
     private Label      _lblFiltered  = null!;
+    private Icon?      _appIcon;
 
     // Periodically refreshes the filtered-message counter from the engine instead of
     // updating the label on every single filtered message (avoids flooding the UI thread).
     private System.Windows.Forms.Timer _countTimer = null!;
     private long _lastShownCount = 0;
 
+    // Set while a hard restart is in progress, so the closing handler skips the work
+    // that OnRestartClick already did.
+    private bool _restarting;
+
     // All filter entries in display order: the five fixed pedals first, then user-added.
     private readonly List<FilterItem> _filters = new();
     // Toggle buttons parallel to _filters (same index), rebuilt by RebuildFilterRows.
     private readonly List<FilterToggleButton> _toggleButtons = new();
 
-    // Shared font for the small rename/remove icon buttons, so rebuilding never leaks fonts.
-    private static readonly Font _iconFont = new("Segoe UI", 9f, FontStyle.Bold);
+    // Shared fonts, created once for the app lifetime so rebuilding rows or reopening
+    // dialogs never leaks GDI font handles.
+    private static readonly Font _iconFont    = new("Segoe UI", 9f,   FontStyle.Bold);
+    private static readonly Font _formFont    = new("Segoe UI", 9.5f);
+    private static readonly Font _bigBtnFont  = new("Segoe UI", 10f,  FontStyle.Bold);
+    private static readonly Font _twoLineFont = new("Segoe UI", 8f,   FontStyle.Bold);
+    private static readonly Font _logFont     = new("Consolas",  8.5f);
 
     // Maximum entries kept in the activity log.
     private const int MaxLogEntries = 200;
+
+    // Identical log lines within this window are dropped, so a burst of repeated
+    // messages can never fill the list box or saturate the UI thread.
+    private const int LogDuplicateWindowMs = 1500;
+    private string _lastLogText = string.Empty;
+    private long   _lastLogTick;
 
     // Filter list layout.
     private const int FilterPanelWidth = 428;
@@ -166,18 +183,21 @@ public class MainForm : Form
     /// </summary>
     private void BuildUI()
     {
-        Text            = "MidiFilter v1.4.0";
+        Text            = "MidiFilter v1.5.0";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox     = false;
         BackColor       = Color.FromArgb(30, 30, 30);
         ForeColor       = Color.WhiteSmoke;
-        Font            = new Font("Segoe UI", 9.5f);
+        Font            = _formFont;
         StartPosition   = FormStartPosition.CenterScreen;
 
         using var stream = typeof(MainForm).Assembly
             .GetManifestResourceStream("MidiFilter.midi.ico");
         if (stream != null)
-            Icon = new Icon(stream);
+        {
+            _appIcon = new Icon(stream);   // disposed in the closing handler
+            Icon     = _appIcon;
+        }
 
         int pad = 18;
         int y   = pad;
@@ -249,11 +269,10 @@ public class MainForm : Form
         y += _filterPanel.Height + 14;
 
         // --- Buttons: Start | Stop | Refresh Devices | Restart App (4 slots) ---
-        const int btnGap = 7;
+        const int btnGap   = 7;
         const int totalW   = FilterPanelWidth;
         const int btnW     = (totalW - btnGap * 3) / 4;   // ~101px each
         const int lastBtnW = totalW - (btnW + btnGap) * 3; // remainder to avoid rounding gap
-        var twoLineFont = new Font("Segoe UI", 8f, FontStyle.Bold);
 
         _btnStart = new Button
         {
@@ -262,7 +281,7 @@ public class MainForm : Form
             BackColor = Color.FromArgb(40, 120, 40),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Font      = new Font("Segoe UI", 10f, FontStyle.Bold)
+            Font      = _bigBtnFont
         };
         _btnStart.FlatAppearance.BorderColor = Color.FromArgb(60, 160, 60);
         Controls.Add(_btnStart);
@@ -274,7 +293,7 @@ public class MainForm : Form
             BackColor = Color.FromArgb(120, 40, 40),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Font      = new Font("Segoe UI", 10f, FontStyle.Bold),
+            Font      = _bigBtnFont,
             Enabled   = false
         };
         _btnStop.FlatAppearance.BorderColor = Color.FromArgb(160, 60, 60);
@@ -288,14 +307,15 @@ public class MainForm : Form
             BackColor = Color.FromArgb(50, 80, 120),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Font      = twoLineFont
+            Font      = _twoLineFont
         };
         _btnRefresh.FlatAppearance.BorderColor        = Color.FromArgb(70, 110, 160);
         _btnRefresh.FlatAppearance.MouseOverBackColor = Color.FromArgb(65, 100, 145);
         _btnRefresh.FlatAppearance.MouseDownBackColor = Color.FromArgb(40, 65, 100);
         Controls.Add(_btnRefresh);
 
-        // Slot 3: Restart App - dark grey, two-line text, always enabled
+        // Slot 3: Restart App - dark grey, two-line text, always enabled.
+        // Performs a real process restart (see OnRestartClick).
         _btnRestart = new Button
         {
             Text      = "Restart\nApp",
@@ -303,7 +323,7 @@ public class MainForm : Form
             BackColor = Color.FromArgb(65, 65, 65),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            Font      = twoLineFont
+            Font      = _twoLineFont
         };
         _btnRestart.FlatAppearance.BorderColor        = Color.FromArgb(95, 95, 95);
         _btnRestart.FlatAppearance.MouseOverBackColor = Color.FromArgb(80, 80, 80);
@@ -344,7 +364,7 @@ public class MainForm : Form
             BackColor     = Color.FromArgb(20, 20, 20),
             ForeColor     = Color.FromArgb(100, 220, 100),
             BorderStyle   = BorderStyle.FixedSingle,
-            Font          = new Font("Consolas", 8.5f),
+            Font          = _logFont,
             SelectionMode = SelectionMode.None
         };
         Controls.Add(_logBox);
@@ -594,12 +614,32 @@ public class MainForm : Form
 
     /// <summary>
     /// Persists fixed-pedal states and custom filters in a single write.
-    /// Called on any filter change, on start, and on close.
+    /// Called on any filter change, on start, on restart, and on close.
     /// </summary>
     private void SaveFilterState()
     {
         AppSettings.SaveFilters(CollectFixedBlockedCCs(), CollectCustomFilters());
     }
+
+    /// <summary>
+    /// Persists the current device selection if both entries are real devices.
+    /// Called by StartFilter, OnRestartClick, and the closing handler.
+    /// </summary>
+    private void SaveDeviceSelection()
+    {
+        string inputName  = _cmbInput.SelectedItem  as string ?? string.Empty;
+        string outputName = _cmbOutput.SelectedItem as string ?? string.Empty;
+
+        if (IsRealDevice(inputName) && IsRealDevice(outputName))
+            AppSettings.Save(inputName, outputName);
+    }
+
+    /// <summary>
+    /// True when the given combo box entry is an actual device and not the placeholder.
+    /// Called by SaveDeviceSelection and StartFilter.
+    /// </summary>
+    private static bool IsRealDevice(string name)
+        => !string.IsNullOrWhiteSpace(name) && name.Trim() != "-";
 
     /// <summary>
     /// Opens the picker dialog and adds the chosen filters. Entries already present are
@@ -702,43 +742,62 @@ public class MainForm : Form
     /// </summary>
     private void PopulateDevices()
     {
-        string prevIn  = _cmbInput.Text;
-        string prevOut = _cmbOutput.Text;
-        bool firstLoad = string.IsNullOrEmpty(prevIn) && string.IsNullOrEmpty(prevOut);
+        string prevIn  = _cmbInput.SelectedItem  as string ?? string.Empty;
+        string prevOut = _cmbOutput.SelectedItem as string ?? string.Empty;
+        bool firstLoad = _cmbInput.Items.Count == 0 && _cmbOutput.Items.Count == 0;
 
-        _cmbInput.Items.Clear();
-        _cmbOutput.Items.Clear();
-
-        // Blank placeholder shown when nothing is selected
-        _cmbInput.Items.Add(" - ");
-        _cmbOutput.Items.Add(" - ");
-
-        foreach (var d in MidiFilterEngine.GetInputDevices())
-            _cmbInput.Items.Add(d);
-
-        foreach (var d in MidiFilterEngine.GetOutputDevices())
-            _cmbOutput.Items.Add(d);
-
-        if (firstLoad)
+        _cmbInput.BeginUpdate();
+        _cmbOutput.BeginUpdate();
+        try
         {
-            string? savedIn  = AppSettings.LoadInput();
-            string? savedOut = AppSettings.LoadOutput();
+            _cmbInput.Items.Clear();
+            _cmbOutput.Items.Clear();
 
-            _cmbInput.SelectedIndex  = savedIn  != null ? FindItemIndex(_cmbInput,  savedIn)  ?? 0 : 0;
-            _cmbOutput.SelectedIndex = savedOut != null ? FindItemIndex(_cmbOutput, savedOut) ?? 0 : 0;
+            // Blank placeholder shown when nothing is selected
+            _cmbInput.Items.Add(" - ");
+            _cmbOutput.Items.Add(" - ");
+
+            foreach (var d in MidiFilterEngine.GetInputDevices())
+                _cmbInput.Items.Add(d);
+
+            foreach (var d in MidiFilterEngine.GetOutputDevices())
+                _cmbOutput.Items.Add(d);
+
+            if (firstLoad)
+            {
+                string? savedIn  = AppSettings.LoadInput();
+                string? savedOut = AppSettings.LoadOutput();
+
+                _cmbInput.SelectedIndex  = savedIn  != null ? EnsureItem(_cmbInput,  savedIn)  : 0;
+                _cmbOutput.SelectedIndex = savedOut != null ? EnsureItem(_cmbOutput, savedOut) : 0;
+            }
+            else
+            {
+                _cmbInput.SelectedIndex  = IsRealDevice(prevIn)  ? EnsureItem(_cmbInput,  prevIn)  : 0;
+                _cmbOutput.SelectedIndex = IsRealDevice(prevOut) ? EnsureItem(_cmbOutput, prevOut) : 0;
+            }
         }
-        else
+        finally
         {
-            if (!string.IsNullOrEmpty(prevIn) && _cmbInput.Items.Contains(prevIn))
-                _cmbInput.SelectedItem = prevIn;
-            else
-                _cmbInput.SelectedIndex = 0;
-
-            if (!string.IsNullOrEmpty(prevOut) && _cmbOutput.Items.Contains(prevOut))
-                _cmbOutput.SelectedItem = prevOut;
-            else
-                _cmbOutput.SelectedIndex = 0;
+            _cmbInput.EndUpdate();
+            _cmbOutput.EndUpdate();
         }
+    }
+
+    /// <summary>
+    /// Returns the index of the item matching the given device name, adding the name to the
+    /// list when the device is currently offline. Keeping an absent device selectable lets
+    /// the engine wait for it to appear (Synthesia or a virtual port started later) instead
+    /// of forcing the user to restart the app once the device shows up.
+    /// Called by PopulateDevices.
+    /// </summary>
+    private static int EnsureItem(ComboBox cmb, string name)
+    {
+        int? found = FindItemIndex(cmb, name);
+        if (found.HasValue)
+            return found.Value;
+
+        return cmb.Items.Add(name);
     }
 
     /// <summary>
@@ -776,28 +835,29 @@ public class MainForm : Form
 
         FormClosing += (_, _) =>
         {
-            _engine.Stop();
             _countTimer.Stop();
-            _countTimer.Dispose();
 
-            // Persist last device selection and the full filter state on every close.
-            string inputName  = _cmbInput.SelectedItem  as string ?? string.Empty;
-            string outputName = _cmbOutput.SelectedItem as string ?? string.Empty;
+            // Full dispose so the watcher thread and the wake handle are released too.
+            try { _engine.Dispose(); } catch { }
 
-            try
+            // Persist last device selection and the full filter state on every close,
+            // unless a restart already did it a moment ago.
+            if (!_restarting)
             {
-                if (!string.IsNullOrWhiteSpace(inputName)  && inputName.Trim()  != "-" &&
-                    !string.IsNullOrWhiteSpace(outputName) && outputName.Trim() != "-")
+                try
                 {
-                    AppSettings.Save(inputName, outputName);
+                    SaveDeviceSelection();
+                    SaveFilterState();
                 }
+                catch
+                {
+                    // Settings location not writable - ignore so closing never fails.
+                }
+            }
 
-                SaveFilterState();
-            }
-            catch
-            {
-                // Settings location not writable - ignore so closing never fails.
-            }
+            _countTimer.Dispose();
+            Icon = null;
+            _appIcon?.Dispose();
         };
 
         _engine.StatusChanged += msg => SafeInvoke(() =>
@@ -828,20 +888,18 @@ public class MainForm : Form
     /// Called by the auto-start Load handler.
     /// </summary>
     private static bool HasValidSelection(ComboBox cmb)
-        => cmb.SelectedItem is string s && !string.IsNullOrWhiteSpace(s) && s.Trim() != "-";
+        => cmb.SelectedItem is string s && IsRealDevice(s);
 
     /// <summary>
     /// Starts the filter engine with the selected devices and current filter selection,
     /// saves the selection to disk, and updates the UI. Returns false (without starting)
     /// if a device is missing. When silent is true the warning popups are suppressed,
     /// used by auto-start so a missing saved device does not nag the user on launch.
-    /// Called from OnStartClick, OnRestartClick, and the auto-start Load handler.
+    /// Called from OnStartClick and the auto-start Load handler.
     /// </summary>
     private bool StartFilter(bool silent)
     {
-        if (_cmbInput.SelectedItem is not string inputName
-            || string.IsNullOrWhiteSpace(inputName)
-            || inputName.Trim() == "-")
+        if (_cmbInput.SelectedItem is not string inputName || !IsRealDevice(inputName))
         {
             if (!silent)
                 MessageBox.Show("Please choose a MIDI Input.", "Error",
@@ -849,9 +907,7 @@ public class MainForm : Form
             return false;
         }
 
-        if (_cmbOutput.SelectedItem is not string outputName
-            || string.IsNullOrWhiteSpace(outputName)
-            || outputName.Trim() == "-")
+        if (_cmbOutput.SelectedItem is not string outputName || !IsRealDevice(outputName))
         {
             if (!silent)
                 MessageBox.Show("Please choose a MIDI Output.", "Error",
@@ -862,6 +918,7 @@ public class MainForm : Form
         _lastShownCount   = 0;
         _lblFiltered.Text = "Filtered: 0 Messages";
         _logBox.Items.Clear();
+        _lastLogText = string.Empty;
 
         ApplyTogglesToEngine();
         AppSettings.Save(inputName, outputName);
@@ -898,39 +955,82 @@ public class MainForm : Form
     /// </summary>
     private void OnStopClick(object? sender, EventArgs e)
     {
-        _engine.Stop();
-        _countTimer.Stop();
+        _btnStop.Enabled = false;
+        UseWaitCursor    = true;
+        try
+        {
+            _engine.Stop();
+            _countTimer.Stop();
+        }
+        finally
+        {
+            UseWaitCursor = false;
+        }
 
         _btnStart.Enabled  = true;
-        _btnStop.Enabled   = false;
         _cmbInput.Enabled  = true;
         _cmbOutput.Enabled = true;
 
         _statusDot.BackColor = Color.Gray;
-        _statusLabel.Text = "Stopped";
+        _statusLabel.Text    = "Stopped";
         AddLog("Filter deactivated.");
     }
 
     /// <summary>
-    /// Fully restarts the filter engine with the current device selection.
-    /// Equivalent to clicking Stop then Start - resets all state including the error
-    /// cooldown, so a manual restart always attempts to connect immediately.
-    /// Called when Restart button is clicked.
+    /// Hard restart: persists the current state, releases the MIDI ports, launches a fresh
+    /// instance and exits this one. A cold process is the only reliable recovery when a MIDI
+    /// driver or a peer application left a port in a broken state.
+    /// Called when the Restart App button is clicked.
     /// </summary>
     private void OnRestartClick(object? sender, EventArgs e)
     {
-        _engine.Stop();
-        _countTimer.Stop();
+        _btnRestart.Enabled = false;
+        _restarting         = true;
+        UseWaitCursor       = true;
 
-        _statusDot.BackColor = Color.Gray;
         _statusLabel.Text = "Restarting...";
-        AddLog(">>>>  App restart triggered  <<<<");
+        AddLog(">>>>  Restarting application  <<<<");
+        Application.DoEvents();   // make the status visible before the window goes away
 
-        // Reuse StartFilter - it validates devices, resets counters, and starts the engine.
-        if (StartFilter(silent: false))
-            AddLog(">>>>  App restart complete   <<<<");
-        else
-            AddLog(">>>>  App restart aborted - check device selection  <<<<");
+        // Save first: the new process reads settings.cfg during its startup.
+        try
+        {
+            SaveDeviceSelection();
+            SaveFilterState();
+        }
+        catch { }
+
+        // Release the MIDI ports before the new instance tries to open them.
+        _countTimer.Stop();
+        try { _engine.Stop(); } catch { }
+
+        try
+        {
+            string? exePath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                Process.Start(new ProcessStartInfo(exePath) { UseShellExecute = true });
+                Application.Exit();
+                return;
+            }
+        }
+        catch
+        {
+            // Fall through to the framework restart below.
+        }
+
+        try
+        {
+            Application.Restart();
+        }
+        catch (Exception ex)
+        {
+            _restarting         = false;
+            _btnRestart.Enabled = true;
+            UseWaitCursor       = false;
+            MessageBox.Show($"Restart failed: {ex.Message}", "Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     /// <summary>
@@ -944,16 +1044,32 @@ public class MainForm : Form
     }
 
     /// <summary>
-    /// Adds a timestamped entry to the log listbox, keeping at most MaxLogEntries entries.
+    /// Adds a timestamped entry to the log listbox, keeping at most MaxLogEntries entries
+    /// and dropping identical repeats within LogDuplicateWindowMs.
     /// Called from engine event handlers.
     /// </summary>
     private void AddLog(string message)
     {
+        long now = Environment.TickCount64;
+        if (message == _lastLogText && now - _lastLogTick < LogDuplicateWindowMs)
+            return;
+
+        _lastLogText = message;
+        _lastLogTick = now;
+
         string entry = $"[{DateTime.Now:HH:mm:ss}] {message}";
-        _logBox.Items.Add(entry);
-        if (_logBox.Items.Count > MaxLogEntries)
-            _logBox.Items.RemoveAt(0);
-        _logBox.TopIndex = _logBox.Items.Count - 1;
+        _logBox.BeginUpdate();
+        try
+        {
+            _logBox.Items.Add(entry);
+            if (_logBox.Items.Count > MaxLogEntries)
+                _logBox.Items.RemoveAt(0);
+            _logBox.TopIndex = _logBox.Items.Count - 1;
+        }
+        finally
+        {
+            _logBox.EndUpdate();
+        }
     }
 
     /// <summary>
@@ -965,7 +1081,7 @@ public class MainForm : Form
         // Async BeginInvoke so the MIDI/watcher thread never blocks on the UI thread:
         // prevents added MIDI latency under load and avoids a deadlock when Stop joins
         // the watcher thread. The guards cover the window where the form is closing.
-        if (IsDisposed || !IsHandleCreated)
+        if (IsDisposed || !IsHandleCreated || _restarting)
             return;
         try
         {
@@ -1088,7 +1204,7 @@ public class MainForm : Form
             ShowInTaskbar   = false;
             BackColor       = Color.FromArgb(30, 30, 30);
             ForeColor       = Color.WhiteSmoke;
-            Font            = new Font("Segoe UI", 9.5f);
+            Font            = _formFont;
             ClientSize      = new Size(452, 500);
 
             _chkAllNotes = new CheckBox
@@ -1200,7 +1316,7 @@ public class MainForm : Form
             ShowInTaskbar   = false;
             BackColor       = Color.FromArgb(30, 30, 30);
             ForeColor       = Color.WhiteSmoke;
-            Font            = new Font("Segoe UI", 9.5f);
+            Font            = _formFont;
             ClientSize      = new Size(320, 132);
 
             Controls.Add(new Label

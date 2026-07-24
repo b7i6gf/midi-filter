@@ -16,7 +16,7 @@ echo .NET SDK found.
 echo Building MidiFilter.exe...
 echo.
 
-dotnet publish files\MidiFilter.csproj ^
+dotnet publish .\MidiFilter.csproj ^
     -c Release ^
     -r win-x64 ^
     --self-contained true ^

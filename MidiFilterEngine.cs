@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using NAudio.Midi;
 
@@ -10,26 +9,27 @@ namespace MidiFilter;
 /// Core MIDI filter engine. Reads from a named MIDI input, filters specified CCs
 /// and notes (individually or all notes at once), and forwards all other messages
 /// to a named MIDI output.
+/// Device handles are owned exclusively by the watcher thread logic and guarded by
+/// _deviceLock plus a generation counter, so a Stop() during an in-flight connect can
+/// never leave an orphaned open port behind (that was the state that required a full
+/// application restart).
 /// Called by MainForm to start/stop filtering and receive status updates.
 /// </summary>
 public class MidiFilterEngine : IDisposable
 {
-    // CCs to block on all channels - updated at runtime via SetBlockedCCs.
-    // The set is swapped atomically (never mutated in place), so a volatile
-    // reference read is enough for the MIDI thread to see the latest set.
-    private volatile HashSet<int> _blockedCCs = new() { 11, 64, 66, 69 };
+    // ---------------------------------------------------------------------
+    // Filter state. Sets are swapped atomically (never mutated in place), so a
+    // volatile reference read is enough for the MIDI thread to see the latest set.
+    // ---------------------------------------------------------------------
+    private volatile HashSet<int> _blockedCCs   = new() { 11, 64, 66, 69 };
+    private volatile HashSet<int> _blockedNotes = new();
+    private volatile bool         _blockAllNotes;
 
     /// <summary>
     /// Replaces the active blocked CC set. Takes effect immediately on the next message.
     /// Called by MainForm whenever a checkbox is toggled.
     /// </summary>
     public void SetBlockedCCs(HashSet<int> ccs) => _blockedCCs = ccs;
-
-    // Note numbers to block on all channels (Note On and Note Off), swapped atomically.
-    private volatile HashSet<int> _blockedNotes = new();
-
-    // When true, every note message is blocked regardless of _blockedNotes.
-    private volatile bool _blockAllNotes;
 
     /// <summary>
     /// Replaces the active blocked-note set. Takes effect on the next message.
@@ -43,14 +43,26 @@ public class MidiFilterEngine : IDisposable
     /// </summary>
     public void SetBlockAllNotes(bool value) => _blockAllNotes = value;
 
-    private MidiIn?  _midiIn;
-    private MidiOut? _midiOut;
-    private Thread?  _watcherThread;
+    // ---------------------------------------------------------------------
+    // Device ownership
+    // ---------------------------------------------------------------------
+    private readonly object _deviceLock = new();
+    private MidiIn?  _midiIn;    // guarded by _deviceLock for writes, read directly on MIDI thread
+    private MidiOut? _midiOut;   // same
+    private int      _generation;// guarded by _deviceLock; bumped on every Disconnect
+
+    private Thread?       _watcherThread;
     private volatile bool _running;
     private volatile bool _connected;
+    private volatile bool _disposed;
 
-    // Signals the watcher thread to wake immediately, so Stop does not have to wait
-    // out the full poll interval before the thread can exit and be joined.
+    // Set by the MIDI callbacks when sending fails or the driver reports an error.
+    // The watcher thread owns the actual teardown, so the MIDI thread never blocks and
+    // never floods the UI with one status message per dropped MIDI event.
+    private volatile bool _faulted;
+
+    // Signals the watcher thread to wake immediately: used by Stop (fast exit) and by
+    // the fault path (fast reconnect instead of waiting out the poll interval).
     private readonly ManualResetEventSlim _wakeSignal = new(false);
 
     // Running total of filtered messages. Incremented on the MIDI thread without any
@@ -65,15 +77,19 @@ public class MidiFilterEngine : IDisposable
     private long _lastLogTick;
     private const long LogMinIntervalMs = 150;
 
+    // Last status text actually raised, used to suppress identical repeats (the watcher
+    // polls every 1.5s and would otherwise repeat "Waiting for Input..." forever).
+    private string _lastStatus = string.Empty;
+
     // Note names in Pianoteq style (flats), with C4 = note 60 and range C-1 to G9.
     private static readonly string[] NoteNames =
         { "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B" };
 
-    // Timestamp of the last failed TryConnect attempt.
-    // Used to enforce a cooldown before retrying after an error.
+    // Timestamp of the last failed connect or of a runtime fault.
+    // Used to enforce a cooldown before retrying, so Windows can release the port.
     private DateTime _lastConnectError = DateTime.MinValue;
-    private static readonly TimeSpan ConnectErrorCooldown = TimeSpan.FromSeconds(4);
-    private static readonly TimeSpan PollInterval         = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan ConnectErrorCooldown = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan PollInterval         = TimeSpan.FromMilliseconds(1000);
 
     private string _inputName  = string.Empty;
     private string _outputName = string.Empty;
@@ -83,24 +99,27 @@ public class MidiFilterEngine : IDisposable
     public event Action<string>? MessageFiltered;
 
     public bool IsConnected => _connected;
+    public bool IsRunning   => _running;
 
     /// <summary>
     /// Starts the filter engine with the given input/output device names.
     /// Launches a background watcher thread that auto-reconnects on device loss.
-    /// Called from MainForm when user clicks Start or Restart.
+    /// Called from MainForm when the user clicks Start.
     /// </summary>
     public void Start(string inputName, string outputName)
     {
         // Ensure any previous run is fully stopped (and its thread joined) before
         // starting a new one, so we never end up with two watcher threads sharing
-        // the device fields. This fixes the duplicate-thread leak on Restart.
+        // the device fields.
         Stop();
 
         _inputName        = inputName;
         _outputName       = outputName;
         _lastConnectError = DateTime.MinValue;
+        _lastStatus       = string.Empty;
+        _faulted          = false;
         Interlocked.Exchange(ref _filteredCount, 0);
-        _lastLogTick = 0;
+        Interlocked.Exchange(ref _lastLogTick, 0);
 
         _wakeSignal.Reset();
         _running = true;
@@ -115,70 +134,125 @@ public class MidiFilterEngine : IDisposable
 
     /// <summary>
     /// Stops the filter engine, waits for the watcher thread to exit, then disposes
-    /// all MIDI resources. Safe to call repeatedly.
-    /// Called from MainForm when user clicks Stop, Restart, or closes the window.
+    /// all MIDI resources. Safe to call repeatedly. Returns true when the watcher
+    /// thread exited cleanly (false means it is stuck in a driver call).
+    /// Called from MainForm on Stop, on restart, and on window close.
     /// </summary>
-    public void Stop()
+    public bool Stop()
     {
         _running = false;
-        _wakeSignal.Set();
+        Wake();
 
-        Thread? t = _watcherThread;
+        bool clean = true;
+        Thread? t  = _watcherThread;
         if (t != null && t.IsAlive)
-            t.Join(TimeSpan.FromSeconds(5));
+            clean = t.Join(TimeSpan.FromSeconds(3));
         _watcherThread = null;
 
         Disconnect();
+        return clean;
     }
 
     /// <summary>
-    /// Background loop that continuously checks device availability and reconnects.
-    /// When connected, actively verifies the input device is still present in the OS
-    /// device list - catches the case where Synthesia closes silently without triggering
-    /// any NAudio error or message event.
-    /// Respects a cooldown after a connection error to avoid hammering a port that
-    /// Windows has not yet fully released (fixes "unspecifiedError calling midioutopen").
+    /// Wakes the watcher thread without throwing if the engine is already disposed.
+    /// Called by Stop and by the MIDI fault path.
+    /// </summary>
+    private void Wake()
+    {
+        if (_disposed)
+            return;
+        try { _wakeSignal.Set(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    /// <summary>
+    /// Background loop: handles runtime faults, verifies both devices are still present
+    /// in the OS device list, and reconnects with a cooldown after errors.
+    /// The whole body is fault tolerant, so a driver exception can never kill the thread
+    /// (which previously left the app running but permanently disconnected).
     /// Runs on _watcherThread.
     /// </summary>
     private void WatchLoop()
     {
         while (_running)
         {
-            if (_connected)
+            try
             {
-                // Active liveness check: verify the input device still exists in the OS.
-                // When Synthesia closes, its virtual MIDI port disappears from the device
-                // list even though NAudio raises no error - this catches that case.
-                if (FindDeviceId(_inputName, isInput: true) == -1)
+                if (_faulted)
                 {
-                    ReportStatus($"Input lost: \"{_inputName}\", reconnecting...");
+                    // A send or driver error was flagged by the MIDI thread: tear the
+                    // connection down here, exactly once, and let the cooldown apply.
+                    _lastConnectError = DateTime.UtcNow;
+                    ReportStatus("Connection lost, reconnecting...");
                     Disconnect();
                 }
+                else if (_connected)
+                {
+                    // Active liveness check on both ports: when the peer app (Synthesia,
+                    // loopMIDI, a DAW) closes, its virtual port disappears from the device
+                    // list without NAudio raising anything.
+                    if (FindDeviceId(_inputName, isInput: true) == -1)
+                    {
+                        ReportStatus($"Input lost: \"{_inputName}\", reconnecting...");
+                        Disconnect();
+                    }
+                    else if (FindDeviceId(_outputName, isInput: false) == -1)
+                    {
+                        ReportStatus($"Output lost: \"{_outputName}\", reconnecting...");
+                        Disconnect();
+                    }
+                }
+                else
+                {
+                    bool inCooldown = _lastConnectError != DateTime.MinValue
+                        && DateTime.UtcNow - _lastConnectError < ConnectErrorCooldown;
+
+                    if (!inCooldown)
+                        TryConnect();
+                }
             }
-            else
+            catch (Exception ex)
             {
-                // Enforce cooldown after an error so Windows has time to fully release
-                // the MIDI port before we attempt to open it again.
-                bool inCooldown = _lastConnectError != DateTime.MinValue
-                    && DateTime.UtcNow - _lastConnectError < ConnectErrorCooldown;
-
-                if (!inCooldown)
-                    TryConnect();
+                _lastConnectError = DateTime.UtcNow;
+                ReportStatus($"Watcher error: {ex.Message}");
+                try { Disconnect(); } catch { }
             }
 
-            // Wait until the next poll, but wake immediately when Stop signals.
-            _wakeSignal.Wait(PollInterval);
+            // Wait until the next poll, but wake immediately on Stop or on a fault.
+            try
+            {
+                _wakeSignal.Wait(PollInterval);
+                if (_running)
+                    _wakeSignal.Reset();
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
         }
     }
 
     /// <summary>
     /// Attempts to find and open the configured input and output devices by name.
-    /// On exception, records the error timestamp to trigger the cooldown in WatchLoop.
-    /// Reports status via StatusChanged event.
+    /// Always tears down any previous handles first, so a half-open state can never
+    /// keep a port busy while the engine reports "waiting for device".
+    /// The opened devices are adopted only if the generation is still current, so a
+    /// concurrent Stop() can never be overwritten by a late-finishing connect.
     /// Called by WatchLoop.
     /// </summary>
     private void TryConnect()
     {
+        Disconnect();
+        if (!_running)
+            return;
+
+        int gen;
+        lock (_deviceLock)
+            gen = _generation;
+
+        MidiIn?  midiIn  = null;
+        MidiOut? midiOut = null;
+
         try
         {
             int inputId  = FindDeviceId(_inputName,  isInput: true);
@@ -196,13 +270,31 @@ public class MidiFilterEngine : IDisposable
                 return;
             }
 
-            Disconnect();
+            midiOut = new MidiOut(outputId);
+            midiIn  = new MidiIn(inputId);
+            midiIn.MessageReceived += OnMessageReceived;
+            midiIn.ErrorReceived   += OnErrorReceived;
 
-            _midiOut = new MidiOut(outputId);
-            _midiIn  = new MidiIn(inputId);
-            _midiIn.MessageReceived += OnMessageReceived;
-            _midiIn.ErrorReceived   += OnErrorReceived;
-            _midiIn.Start();
+            bool adopted = false;
+            lock (_deviceLock)
+            {
+                if (_running && _generation == gen)
+                {
+                    _midiIn  = midiIn;
+                    _midiOut = midiOut;
+                    adopted  = true;
+                }
+            }
+
+            if (!adopted)
+            {
+                // Stopped or reconnected while we were opening: throw the handles away.
+                CloseDevices(midiIn, midiOut);
+                return;
+            }
+
+            _faulted = false;
+            midiIn.Start();
 
             SetConnected(true);
             ReportStatus($"Connected: \"{_inputName}\" -> Filter -> \"{_outputName}\"");
@@ -212,56 +304,65 @@ public class MidiFilterEngine : IDisposable
             _lastConnectError = DateTime.UtcNow;
             ReportStatus($"Connection Error: {ex.Message} (retrying in {ConnectErrorCooldown.TotalSeconds}s...)");
             Disconnect();
+            CloseDevices(midiIn, midiOut);
         }
     }
 
     /// <summary>
     /// Handles incoming MIDI messages. Filters blocked CCs and notes (or all notes),
     /// forwards everything else. Runs on the MIDI thread, so the path stays allocation
-    /// free: it only counts via Interlocked and builds a log string when the time gate
-    /// in ShouldLog allows it.
+    /// free and never touches the UI: a send failure only raises the _faulted flag and
+    /// wakes the watcher, which does the teardown once.
     /// Called by NAudio on MIDI message receipt.
     /// </summary>
     private void OnMessageReceived(object? sender, MidiInMessageEventArgs e)
     {
+        if (_faulted || !_running)
+            return;
+
+        int status  = e.RawMessage & 0xFF;
+        int type    = status & 0xF0;
+        int channel = (status & 0x0F) + 1;
+
+        // CC messages: status 0xB0-0xBF
+        if (type == 0xB0)
+        {
+            int cc = (e.RawMessage >> 8) & 0x7F;
+            if (_blockedCCs.Contains(cc))
+            {
+                Interlocked.Increment(ref _filteredCount);
+                if (ShouldLog())
+                    MessageFiltered?.Invoke($"Blocked: CC{cc} (Channel {channel})");
+                return;
+            }
+        }
+        // Note On (0x90-0x9F) and Note Off (0x80-0x8F); Note On velocity 0 is covered.
+        else if (type == 0x90 || type == 0x80)
+        {
+            int note = (e.RawMessage >> 8) & 0x7F;
+            if (_blockAllNotes || _blockedNotes.Contains(note))
+            {
+                Interlocked.Increment(ref _filteredCount);
+                if (ShouldLog())
+                    MessageFiltered?.Invoke($"Blocked: Note {note} ({NoteName(note)}) (Channel {channel})");
+                return;
+            }
+        }
+
+        MidiOut? outDevice = _midiOut;
+        if (outDevice == null)
+            return;
+
         try
         {
-            int status  = e.RawMessage & 0xFF;
-            int type    = status & 0xF0;
-            int channel = (status & 0x0F) + 1;
-
-            // CC messages: status 0xB0-0xBF
-            if (type == 0xB0)
-            {
-                int cc = (e.RawMessage >> 8) & 0x7F;
-                if (_blockedCCs.Contains(cc))
-                {
-                    Interlocked.Increment(ref _filteredCount);
-                    if (ShouldLog())
-                        MessageFiltered?.Invoke($"Blocked: CC{cc} (Channel {channel})");
-                    return;
-                }
-            }
-            // Note On (0x90-0x9F) and Note Off (0x80-0x8F); Note On velocity 0 is covered.
-            else if (type == 0x90 || type == 0x80)
-            {
-                int note = (e.RawMessage >> 8) & 0x7F;
-                if (_blockAllNotes || _blockedNotes.Contains(note))
-                {
-                    Interlocked.Increment(ref _filteredCount);
-                    if (ShouldLog())
-                        MessageFiltered?.Invoke($"Blocked: Note {note} ({NoteName(note)}) (Channel {channel})");
-                    return;
-                }
-            }
-
-            _midiOut?.Send(e.RawMessage);
+            outDevice.Send(e.RawMessage);
         }
         catch
         {
-            // Device was likely disconnected - trigger reconnect.
-            SetConnected(false);
-            ReportStatus("Connection lost, reconnecting...");
+            // Target port died (peer app closed or changed). Flag once, let the watcher
+            // reconnect; do not report per message or the UI thread gets flooded.
+            _faulted = true;
+            Wake();
         }
     }
 
@@ -273,10 +374,11 @@ public class MidiFilterEngine : IDisposable
     /// </summary>
     private bool ShouldLog()
     {
-        long now = Environment.TickCount64;
-        if (now - _lastLogTick < LogMinIntervalMs)
+        long now  = Environment.TickCount64;
+        long last = Interlocked.Read(ref _lastLogTick);
+        if (now - last < LogMinIntervalMs)
             return false;
-        _lastLogTick = now;
+        Interlocked.Exchange(ref _lastLogTick, now);
         return true;
     }
 
@@ -291,13 +393,13 @@ public class MidiFilterEngine : IDisposable
     }
 
     /// <summary>
-    /// Handles MIDI input errors. Triggers reconnect cycle.
+    /// Handles MIDI input errors by flagging a fault for the watcher thread.
     /// Called by NAudio on MIDI error.
     /// </summary>
     private void OnErrorReceived(object? sender, MidiInMessageEventArgs e)
     {
-        SetConnected(false);
-        ReportStatus("MIDI Error, reconnecting...");
+        _faulted = true;
+        Wake();
     }
 
     /// <summary>
@@ -314,53 +416,100 @@ public class MidiFilterEngine : IDisposable
     }
 
     /// <summary>
-    /// Safely closes and disposes current MIDI in/out devices.
-    /// Called before reconnect attempts and on Stop.
+    /// Detaches the current devices under the lock (bumping the generation so an in-flight
+    /// TryConnect discards its result), then closes them outside the lock so a blocking
+    /// driver call can never deadlock the MIDI callback path.
+    /// Called before every connect attempt and on Stop.
     /// </summary>
     private void Disconnect()
     {
+        MidiIn?  midiIn;
+        MidiOut? midiOut;
+
+        lock (_deviceLock)
+        {
+            _generation++;
+            midiIn   = _midiIn;
+            midiOut  = _midiOut;
+            _midiIn  = null;
+            _midiOut = null;
+        }
+
+        _faulted = false;
         SetConnected(false);
+        CloseDevices(midiIn, midiOut);
+    }
 
-        try { _midiIn?.Stop();     } catch { }
-        try { _midiIn?.Dispose();  } catch { }
-        try { _midiOut?.Dispose(); } catch { }
+    /// <summary>
+    /// Unhooks events and disposes a pair of MIDI devices, swallowing driver errors.
+    /// Called by Disconnect and by TryConnect for handles that were not adopted.
+    /// </summary>
+    private void CloseDevices(MidiIn? midiIn, MidiOut? midiOut)
+    {
+        if (midiIn != null)
+        {
+            try { midiIn.MessageReceived -= OnMessageReceived; } catch { }
+            try { midiIn.ErrorReceived   -= OnErrorReceived;   } catch { }
+            try { midiIn.Stop();    } catch { }
+            try { midiIn.Dispose(); } catch { }
+        }
 
-        _midiIn  = null;
-        _midiOut = null;
+        if (midiOut != null)
+        {
+            try { midiOut.Reset();   } catch { }
+            try { midiOut.Dispose(); } catch { }
+        }
     }
 
     /// <summary>
     /// Searches for a MIDI device by partial name match (case-insensitive).
+    /// Enumeration errors (a device vanishing mid-scan) are treated as "not found"
+    /// instead of propagating onto the watcher thread.
     /// Returns device index or -1 if not found.
     /// Called by TryConnect and WatchLoop.
     /// </summary>
     private static int FindDeviceId(string name, bool isInput)
     {
-        if (isInput)
+        if (string.IsNullOrWhiteSpace(name))
+            return -1;
+
+        try
         {
-            for (int i = 0; i < MidiIn.NumberOfDevices; i++)
+            int count = isInput ? MidiIn.NumberOfDevices : MidiOut.NumberOfDevices;
+            for (int i = 0; i < count; i++)
             {
-                if (MidiIn.DeviceInfo(i).ProductName.Contains(name, StringComparison.OrdinalIgnoreCase))
-                    return i;
+                try
+                {
+                    string product = isInput
+                        ? MidiIn.DeviceInfo(i).ProductName
+                        : MidiOut.DeviceInfo(i).ProductName;
+
+                    if (product.Contains(name, StringComparison.OrdinalIgnoreCase))
+                        return i;
+                }
+                catch
+                {
+                    // Device disappeared between the count and the query - skip it.
+                }
             }
         }
-        else
+        catch
         {
-            for (int i = 0; i < MidiOut.NumberOfDevices; i++)
-            {
-                if (MidiOut.DeviceInfo(i).ProductName.Contains(name, StringComparison.OrdinalIgnoreCase))
-                    return i;
-            }
+            // Driver enumeration failed entirely - report as not found.
         }
         return -1;
     }
 
     /// <summary>
-    /// Fires the StatusChanged event on the calling thread.
+    /// Fires the StatusChanged event on the calling thread, skipping identical repeats
+    /// so polling does not fill the activity log with the same line.
     /// Called throughout the engine to report state changes.
     /// </summary>
     private void ReportStatus(string message)
     {
+        if (message == _lastStatus)
+            return;
+        _lastStatus = message;
         StatusChanged?.Invoke(message);
     }
 
@@ -371,8 +520,14 @@ public class MidiFilterEngine : IDisposable
     public static List<string> GetInputDevices()
     {
         var list = new List<string>();
-        for (int i = 0; i < MidiIn.NumberOfDevices; i++)
-            list.Add(MidiIn.DeviceInfo(i).ProductName);
+        try
+        {
+            for (int i = 0; i < MidiIn.NumberOfDevices; i++)
+            {
+                try { list.Add(MidiIn.DeviceInfo(i).ProductName); } catch { }
+            }
+        }
+        catch { }
         return list;
     }
 
@@ -383,14 +538,31 @@ public class MidiFilterEngine : IDisposable
     public static List<string> GetOutputDevices()
     {
         var list = new List<string>();
-        for (int i = 0; i < MidiOut.NumberOfDevices; i++)
-            list.Add(MidiOut.DeviceInfo(i).ProductName);
+        try
+        {
+            for (int i = 0; i < MidiOut.NumberOfDevices; i++)
+            {
+                try { list.Add(MidiOut.DeviceInfo(i).ProductName); } catch { }
+            }
+        }
+        catch { }
         return list;
     }
 
+    /// <summary>
+    /// Stops the engine and releases the wake handle. The handle is only disposed when
+    /// the watcher thread actually exited, otherwise it is deliberately leaked (process
+    /// is ending anyway) to avoid an ObjectDisposedException on a stuck driver call.
+    /// Called by MainForm on form close.
+    /// </summary>
     public void Dispose()
     {
-        Stop();
-        _wakeSignal.Dispose();
+        bool clean = Stop();
+        _disposed  = true;
+        if (clean)
+        {
+            try { _wakeSignal.Dispose(); } catch { }
+        }
+        GC.SuppressFinalize(this);
     }
 }

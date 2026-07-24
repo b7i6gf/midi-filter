@@ -36,7 +36,7 @@ public sealed class CustomFilter
 /// The file is parsed once into an in-memory cache; reads hit the cache and writes update
 /// the cache and persist it in a single pass. All file access is guarded so a non-writable
 /// or locked location never crashes the app (settings simply will not persist in that case).
-/// Called by MainForm on startup and when the user starts/stops the filter.
+/// Called by MainForm on startup and whenever devices or filters change.
 /// </summary>
 internal static class AppSettings
 {
@@ -104,14 +104,14 @@ internal static class AppSettings
     public static string? LoadOutput() => Read(KeyOutput);
 
     /// <summary>
-    /// Returns the saved set of blocked CC numbers, or null if no entry exists.
-    /// A null return means the caller should apply its own default (all CCs blocked).
+    /// Returns the saved set of blocked CC numbers, or null if the key does not exist yet.
+    /// An existing but empty entry means "all fixed pedals off" and returns an empty set,
+    /// so that state survives a restart instead of falling back to the all-on default.
     /// Called by MainForm on startup to restore toggle states.
     /// </summary>
     public static HashSet<int>? LoadBlockedCCs()
     {
-        string? raw = Read(KeyBlockedCCs);
-        if (raw == null)
+        if (!Cache().TryGetValue(KeyBlockedCCs, out string? raw) || raw == null)
             return null;
 
         var result = new HashSet<int>();
@@ -125,7 +125,7 @@ internal static class AppSettings
 
     /// <summary>
     /// Persists the selected input and output device names in a single write.
-    /// Called by MainForm when the user starts the filter and on form close.
+    /// Called by MainForm when the filter starts, on restart, and on form close.
     /// </summary>
     public static void Save(string inputName, string outputName)
     {
@@ -135,13 +135,13 @@ internal static class AppSettings
     }
 
     /// <summary>
-    /// Returns the saved custom filter entries, or null if no entry exists.
+    /// Returns the saved custom filter entries, or null if the key does not exist yet.
+    /// An existing but empty entry returns an empty list (user removed all custom filters).
     /// Called by MainForm on startup to restore the custom filters.
     /// </summary>
     public static List<CustomFilter>? LoadCustomFilters()
     {
-        string? raw = Read(KeyCustomFilters);
-        if (raw == null)
+        if (!Cache().TryGetValue(KeyCustomFilters, out string? raw) || raw == null)
             return null;
 
         var list = new List<CustomFilter>();
@@ -162,9 +162,9 @@ internal static class AppSettings
                 string type   = f[0].Trim().ToLowerInvariant();
                 bool   active = f[2].Trim() == "1";
                 string name   = f.Length >= 4 ? UnescapeName(f[3]) : string.Empty;
-                if (type == "cc")
+                if (type == "cc" && value is >= 0 and <= 127)
                     list.Add(new CustomFilter(FilterKind.Cc, value, active, name));
-                else if (type == "note")
+                else if (type == "note" && value is >= 0 and <= 127)
                     list.Add(new CustomFilter(FilterKind.Note, value, active, name));
             }
         }
@@ -183,7 +183,7 @@ internal static class AppSettings
     }
 
     /// <summary>
-    /// Serializes custom filter entries to the compact "type:value:active" form.
+    /// Serializes custom filter entries to the compact "type:value:active[:name]" form.
     /// Called by SaveFilters.
     /// </summary>
     private static string SerializeCustom(IEnumerable<CustomFilter> customFilters)
@@ -228,7 +228,7 @@ internal static class AppSettings
 
     /// <summary>
     /// Reads a single value by key from the cache. Returns null if missing or empty.
-    /// Called by the Load* methods.
+    /// Called by LoadInput and LoadOutput (where an empty value is meaningless).
     /// </summary>
     private static string? Read(string key)
     {
@@ -237,7 +237,8 @@ internal static class AppSettings
     }
 
     /// <summary>
-    /// Writes the full cache to disk, creating the directory if needed.
+    /// Writes the full cache to disk via a temporary file, so an interrupted write can
+    /// never leave a half-written settings.cfg behind.
     /// Failures (read-only location, locked file) are swallowed so the app never crashes.
     /// Called by Save and SaveFilters.
     /// </summary>
@@ -246,7 +247,14 @@ internal static class AppSettings
         try
         {
             Directory.CreateDirectory(SettingsDir);
-            File.WriteAllLines(SettingsFile, _cache!.Select(kv => $"{kv.Key}={kv.Value}"));
+
+            string tmp = SettingsFile + ".tmp";
+            File.WriteAllLines(tmp, _cache!.Select(kv => $"{kv.Key}={kv.Value}"));
+
+            if (File.Exists(SettingsFile))
+                File.Replace(tmp, SettingsFile, null);
+            else
+                File.Move(tmp, SettingsFile);
         }
         catch
         {
