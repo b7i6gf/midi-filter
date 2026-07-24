@@ -4,7 +4,7 @@ This program is mostly coded with Anthropic Claude Sonnet 4.6 and Opus 4.8!
 
 ---
 
-<img width="462" height="688" alt="{D0E875F3-0E7A-42EF-9E16-A1BB52DED0A3}" src="https://github.com/user-attachments/assets/950f9fb3-51cd-40f0-96a5-8643312ab962" />
+<img width="466" height="690" alt="{0C1398A1-3441-4E4D-8572-FC2AABC74434}" src="https://github.com/user-attachments/assets/469ae088-4cb7-432e-aefc-1d280eb30259" />
 
 
 
