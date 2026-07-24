@@ -1,6 +1,6 @@
 # midi-filter
 
-This program is mostly coded with Anthropic Claude Sonnet 4.6 and Opus 4.8!
+This program is mostly coded with Anthropic Claude Sonnet 4.6 and Opus 4.8 & 5!
 
 ---
 
@@ -69,12 +69,9 @@ Simply download the MidiFilter.exe file and start it.
 I recommend putting it in a separate folder since it creates a settings.cfg file once an Input and Output device are set.
 
 You can also build the project on your own. For this .NET 8 is required.
-I provid you a small script which automatically builds it if you want to. It's called build.cmd. You need to place it in the root folder where the folder "files" is located.
+I provid you a small script which automatically builds it if you want to. It's called build.cmd.
 
 Official Microsoft Link to the download page:
 https://dotnet.microsoft.com/en-us/download/dotnet/8.0
 
 ---
-## Future Endeavours
-
-[] adding multiple custom filter to handle all Controllers needed
