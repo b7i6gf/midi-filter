@@ -11,6 +11,14 @@
     <RootNamespace>MidiFilter</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <Company>b7i6gf</Company>
+    <Authors>b7i6gf</Authors>
+    <Product>MidiFilter</Product>
+    <AssemblyTitle>MidiFilter</AssemblyTitle>
+    <Description>A C# tool that forwards MIDI signals from a keyboard while filtering out selected control change messages.</Description>
+    <Copyright>Copyright (c) 2026 b7i6gf</Copyright>
+
+
     <ApplicationIcon>midi.ico</ApplicationIcon>
   </PropertyGroup>
 
