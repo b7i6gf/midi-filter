@@ -4,8 +4,7 @@ This program is mostly coded with Anthropic Claude Sonnet 4.6 and Opus 4.8 & 5!
 
 ---
 
-<img width="466" height="690" alt="{0C1398A1-3441-4E4D-8572-FC2AABC74434}" src="https://github.com/user-attachments/assets/469ae088-4cb7-432e-aefc-1d280eb30259" />
-
+<img width="466" height="690" alt="{5A66B896-E35F-43FE-992C-21124F72EB4E}" src="https://github.com/user-attachments/assets/7f412459-cf95-48e5-b16e-d4677e33228e" />
 
 
 
@@ -61,6 +60,8 @@ See my personal routing here:
 - Add custom filters, rename them or simply delete them again.
 <img width="437" height="252" alt="image" src="https://github.com/user-attachments/assets/07e25876-337e-4493-b521-86b565d14e75" />
 
+- Simply switch off the activity log when it's not needed
+<img width="440" height="154" alt="{8D359099-62E5-4037-A99F-96B85A287221}" src="https://github.com/user-attachments/assets/09aa97b6-9df7-424f-a8ca-c5dfa9418663" />
 
 ---
 ## Installation
