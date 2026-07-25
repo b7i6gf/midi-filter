@@ -29,8 +29,15 @@ public class MainForm : Form
     private Panel      _filterPanel  = null!;
     private Panel      _statusDot    = null!;
     private Label      _statusLabel  = null!;
-    private ListBox    _logBox       = null!;
+    private LogView    _logView      = null!;
+    private Label      _logLabel     = null!;
+    private ClickPanel _btnLogToggle = null!;
     private Label      _lblFiltered  = null!;
+
+    // Activity log state and the geometry needed to grow/shrink the window with it.
+    private bool _logEnabled = true;
+    private int  _logViewTop;      // top of the log area
+    private int  _formHeightBase;  // window height with the log area removed
     private Icon?      _appIcon;
 
     // Periodically refreshes the filtered-message counter from the engine instead of
@@ -58,11 +65,10 @@ public class MainForm : Form
     // Maximum entries kept in the activity log.
     private const int MaxLogEntries = 200;
 
-    // Identical log lines within this window are dropped, so a burst of repeated
-    // messages can never fill the list box or saturate the UI thread.
-    private const int LogDuplicateWindowMs = 1500;
-    private string _lastLogText = string.Empty;
-    private long   _lastLogTick;
+    // Activity log area: view height plus the gap below it. Removed from the window
+    // height when the log is disabled.
+    private const int LogViewHeight    = 120;
+    private const int LogSectionHeight = LogViewHeight + 8;
 
     // Filter list layout.
     private const int FilterPanelWidth = 428;
@@ -81,6 +87,7 @@ public class MainForm : Form
 
     public MainForm()
     {
+        _logEnabled = AppSettings.LoadLogEnabled();  // layout depends on it
         LoadFilters();      // build _filters from saved settings (must run before BuildUI)
         BuildUI();
         PopulateDevices();
@@ -183,7 +190,7 @@ public class MainForm : Form
     /// </summary>
     private void BuildUI()
     {
-        Text            = "MidiFilter v1.5.0";
+        Text            = "MidiFilter v1.5.1";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox     = false;
         BackColor       = Color.FromArgb(30, 30, 30);
@@ -355,20 +362,33 @@ public class MainForm : Form
         Controls.Add(statusPanel);
         y += 32;
 
-        // --- Log ---
-        AddLabel("Activity Log:", pad, y);
-        y += 22;
-        _logBox = new ListBox
+        // --- Log header: label + on/off toggle (the header stays visible when the log is off) ---
+        _logLabel = new Label
         {
-            Left          = pad, Top = y, Width = FilterPanelWidth, Height = 120,
-            BackColor     = Color.FromArgb(20, 20, 20),
-            ForeColor     = Color.FromArgb(100, 220, 100),
-            BorderStyle   = BorderStyle.FixedSingle,
-            Font          = _logFont,
-            SelectionMode = SelectionMode.None
+            Text      = "Activity Log:", Left = pad, Top = y,
+            AutoSize  = true,
+            ForeColor = Color.FromArgb(180, 180, 180)
         };
-        Controls.Add(_logBox);
-        y += 128;
+        Controls.Add(_logLabel);
+
+        _btnLogToggle = new ClickPanel("Log Off")
+        {
+            Left   = pad + FilterPanelWidth - 78, Top = y - 2,
+            Width  = 78,                          Height = 20,
+            Cursor = Cursors.Hand
+        };
+        Controls.Add(_btnLogToggle);
+        y += 22;
+
+        // --- Log ---
+        _logViewTop = y;
+        _logView = new LogView(MaxLogEntries)
+        {
+            Left = pad, Top = y, Width = FilterPanelWidth, Height = LogViewHeight,
+            Font = _logFont
+        };
+        Controls.Add(_logView);
+        y += LogSectionHeight;
 
         _lblFiltered = new Label
         {
@@ -380,9 +400,12 @@ public class MainForm : Form
         y += 24;
 
         // Fixed window sized to fit all content (including the initial filter list height).
-        int formHeight = y + pad + (Height - ClientSize.Height);
-        Size        = new Size(480, formHeight);
-        MinimumSize = new Size(480, formHeight);
+        int formHeight  = y + pad + (Height - ClientSize.Height);
+        _formHeightBase = formHeight - LogSectionHeight;
+        Size            = new Size(480, formHeight);
+        MinimumSize     = new Size(480, formHeight);
+
+        ApplyLogVisibility();
     }
 
     /// <summary>
@@ -828,6 +851,7 @@ public class MainForm : Form
         _btnRefresh.Click     += OnRefreshClick;
         _btnToggleAll.Clicked += OnToggleAllClick;
         _btnAdd.Clicked       += OnAddClick;
+        _btnLogToggle.Clicked += OnLogToggleClick;
 
         // Counter refresh timer - runs only while filtering (started in StartFilter).
         _countTimer = new System.Windows.Forms.Timer { Interval = 250 };
@@ -917,8 +941,7 @@ public class MainForm : Form
 
         _lastShownCount   = 0;
         _lblFiltered.Text = "Filtered: 0 Messages";
-        _logBox.Items.Clear();
-        _lastLogText = string.Empty;
+        _logView.Clear();
 
         ApplyTogglesToEngine();
         AppSettings.Save(inputName, outputName);
@@ -1044,32 +1067,50 @@ public class MainForm : Form
     }
 
     /// <summary>
-    /// Adds a timestamped entry to the log listbox, keeping at most MaxLogEntries entries
-    /// and dropping identical repeats within LogDuplicateWindowMs.
+    /// Adds an entry to the activity log. Repeated messages are collapsed into a counted
+    /// line by the log view instead of being dropped. Does nothing while the log is off.
     /// Called from engine event handlers.
     /// </summary>
     private void AddLog(string message)
     {
-        long now = Environment.TickCount64;
-        if (message == _lastLogText && now - _lastLogTick < LogDuplicateWindowMs)
+        if (!_logEnabled)
             return;
+        _logView.Add(message);
+    }
 
-        _lastLogText = message;
-        _lastLogTick = now;
+    /// <summary>
+    /// Switches the activity log on or off, persists the state, and resizes the window.
+    /// Disabling drops all entries and stops the engine from raising log events at all.
+    /// Called when the log toggle in the log header is clicked.
+    /// </summary>
+    private void OnLogToggleClick(object? sender, EventArgs e)
+    {
+        _logEnabled = !_logEnabled;
+        AppSettings.SaveLogEnabled(_logEnabled);
+        ApplyLogVisibility();
+    }
 
-        string entry = $"[{DateTime.Now:HH:mm:ss}] {message}";
-        _logBox.BeginUpdate();
-        try
-        {
-            _logBox.Items.Add(entry);
-            if (_logBox.Items.Count > MaxLogEntries)
-                _logBox.Items.RemoveAt(0);
-            _logBox.TopIndex = _logBox.Items.Count - 1;
-        }
-        finally
-        {
-            _logBox.EndUpdate();
-        }
+    /// <summary>
+    /// Applies the current log state: shows or hides the log area, moves the counter label,
+    /// resizes the window, updates the header texts, and tells the engine whether to raise
+    /// per-message log events.
+    /// Called at the end of BuildUI and by OnLogToggleClick.
+    /// </summary>
+    private void ApplyLogVisibility()
+    {
+        if (!_logEnabled)
+            _logView.Clear();
+
+        _logView.Visible  = _logEnabled;
+        _logLabel.Text    = _logEnabled ? "Activity Log:" : "Activity Log (disabled)";
+        _btnLogToggle.SetLabel(_logEnabled ? "Log Off" : "Log On");
+        _lblFiltered.Top  = _logViewTop + (_logEnabled ? LogSectionHeight : 0);
+
+        int height  = _formHeightBase + (_logEnabled ? LogSectionHeight : 0);
+        MinimumSize = new Size(480, height);   // set first so Size is never clamped
+        Size        = new Size(480, height);
+
+        _engine.SetLogFiltered(_logEnabled);
     }
 
     /// <summary>

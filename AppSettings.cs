@@ -50,6 +50,7 @@ internal static class AppSettings
     private const string KeyOutput        = "LastOutput";
     private const string KeyBlockedCCs    = "BlockedCCs";
     private const string KeyCustomFilters = "CustomFilters";
+    private const string KeyLogEnabled    = "LogEnabled";
 
     // Lazily loaded key/value cache; null until first access.
     private static Dictionary<string, string>? _cache;
@@ -121,6 +122,27 @@ internal static class AppSettings
                 result.Add(cc);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Returns the saved activity-log state, defaulting to enabled when nothing is saved.
+    /// Called by MainForm before building the window (the layout depends on it).
+    /// </summary>
+    public static bool LoadLogEnabled()
+    {
+        if (!Cache().TryGetValue(KeyLogEnabled, out string? raw) || string.IsNullOrEmpty(raw))
+            return true;
+        return raw.Trim() != "0";
+    }
+
+    /// <summary>
+    /// Persists the activity-log state.
+    /// Called by MainForm when the log is switched on or off.
+    /// </summary>
+    public static void SaveLogEnabled(bool enabled)
+    {
+        Cache()[KeyLogEnabled] = enabled ? "1" : "0";
+        Persist();
     }
 
     /// <summary>

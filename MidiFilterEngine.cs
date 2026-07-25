@@ -73,9 +73,20 @@ public class MidiFilterEngine : IDisposable
     // Time-based gate for log lines: at most one logged message per LogMinIntervalMs,
     // independent of message rate. Keeps the log readable and the UI cheap when a high
     // volume of notes is filtered (for example with All Notes enabled). The counter
-    // above stays exact regardless of this gate.
+    // above stays exact regardless of this gate. Repeated lines are collapsed by the log
+    // view itself, so this gate can stay short without flooding the list.
     private long _lastLogTick;
-    private const long LogMinIntervalMs = 150;
+    private const long LogMinIntervalMs = 60;
+
+    // When false, no MessageFiltered events are raised at all (activity log disabled in
+    // the UI). Skips the log string entirely on the MIDI thread. Set by MainForm.
+    private volatile bool _logFiltered = true;
+
+    /// <summary>
+    /// Enables or disables the per-message log events. Filtering and counting are
+    /// unaffected. Called by MainForm when the activity log is switched on or off.
+    /// </summary>
+    public void SetLogFiltered(bool value) => _logFiltered = value;
 
     // Last status text actually raised, used to suppress identical repeats (the watcher
     // polls every 1.5s and would otherwise repeat "Waiting for Input..." forever).
@@ -260,13 +271,13 @@ public class MidiFilterEngine : IDisposable
 
             if (inputId == -1)
             {
-                ReportStatus($"Waiting for Input: \"{_inputName}\"...");
+                ReportStatus($"Waiting for Input: \"{_inputName}\"...", suppressRepeat: true);
                 return;
             }
 
             if (outputId == -1)
             {
-                ReportStatus($"Waiting for Output: \"{_outputName}\"...");
+                ReportStatus($"Waiting for Output: \"{_outputName}\"...", suppressRepeat: true);
                 return;
             }
 
@@ -331,7 +342,7 @@ public class MidiFilterEngine : IDisposable
             if (_blockedCCs.Contains(cc))
             {
                 Interlocked.Increment(ref _filteredCount);
-                if (ShouldLog())
+                if (_logFiltered && ShouldLog())
                     MessageFiltered?.Invoke($"Blocked: CC{cc} (Channel {channel})");
                 return;
             }
@@ -343,7 +354,7 @@ public class MidiFilterEngine : IDisposable
             if (_blockAllNotes || _blockedNotes.Contains(note))
             {
                 Interlocked.Increment(ref _filteredCount);
-                if (ShouldLog())
+                if (_logFiltered && ShouldLog())
                     MessageFiltered?.Invoke($"Blocked: Note {note} ({NoteName(note)}) (Channel {channel})");
                 return;
             }
@@ -501,13 +512,14 @@ public class MidiFilterEngine : IDisposable
     }
 
     /// <summary>
-    /// Fires the StatusChanged event on the calling thread, skipping identical repeats
-    /// so polling does not fill the activity log with the same line.
+    /// Fires the StatusChanged event on the calling thread. Only the polling messages pass
+    /// suppressRepeat, so they do not fill the log every cycle while waiting for a device;
+    /// every real state change is always reported, even if its text repeats.
     /// Called throughout the engine to report state changes.
     /// </summary>
-    private void ReportStatus(string message)
+    private void ReportStatus(string message, bool suppressRepeat = false)
     {
-        if (message == _lastStatus)
+        if (suppressRepeat && message == _lastStatus)
             return;
         _lastStatus = message;
         StatusChanged?.Invoke(message);
