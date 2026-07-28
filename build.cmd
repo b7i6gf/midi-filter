@@ -21,8 +21,7 @@ dotnet publish .\MidiFilter.csproj ^
     -r win-x64 ^
     --self-contained true ^
     -p:PublishSingleFile=true ^
-    -p:IncludeNativeLibrariesForSelfExtract=true ^
-    -p:EnableCompressionInSingleFile=true ^
+    -p:EnableCompressionInSingleFile=false ^
     -o .\publish
 
 if %errorlevel% neq 0 (
