@@ -69,7 +69,7 @@ See my personal routing here:
 Simply download the MidiFilter.exe file and start it.
 I recommend putting it in a separate folder since it creates a settings.cfg file once an Input and Output device are set.
 
-You can also build the project on your own. For this .NET 8 is required.
+You can also build the project on your own. For this .NET 10 is required.
 I provid you a small script which automatically builds it if you want to. It's called build.cmd.
 
 Official Microsoft Link to the download page:
