@@ -89,7 +89,7 @@ public class MidiFilterEngine : IDisposable
     public void SetLogFiltered(bool value) => _logFiltered = value;
 
     // Last status text actually raised, used to suppress identical repeats (the watcher
-    // polls every 1.5s and would otherwise repeat "Waiting for Input..." forever).
+    // polls every 1s and would otherwise repeat "Waiting for Input..." forever).
     private string _lastStatus = string.Empty;
 
     // Note names in Pianoteq style (flats), with C4 = note 60 and range C-1 to G9.

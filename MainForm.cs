@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
@@ -27,6 +28,7 @@ public class MainForm : Form
     private ClickPanel _btnToggleAll = null!;
     private ClickPanel _btnAdd       = null!;
     private Panel      _filterPanel  = null!;
+    private Panel      _statusPanel  = null!;
     private Panel      _statusDot    = null!;
     private Label      _statusLabel  = null!;
     private LogView    _logView      = null!;
@@ -144,6 +146,7 @@ public class MainForm : Form
 
         private bool _active;
 
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public bool Active
         {
             get => _active;
@@ -190,7 +193,7 @@ public class MainForm : Form
     /// </summary>
     private void BuildUI()
     {
-        Text            = "MidiFilter v1.5.1";
+        Text            = "MidiFilter v1.5.2";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox     = false;
         BackColor       = Color.FromArgb(30, 30, 30);
@@ -259,10 +262,11 @@ public class MainForm : Form
 
         // --- Scrollable filter list ---
         // Initial visible height shows all current filters plus one free row as a hint that
-        // more can be added, capped at FilterMaxRows. The window stays fixed afterwards; once
-        // the visible area is full, AutoScroll provides a scrollbar.
+        // more can be added, capped at FilterMaxRows. RebuildFilterRows keeps this in sync on
+        // every add/remove afterwards (see ResizeFilterPanel), growing or shrinking the panel
+        // and the window with it; only past FilterMaxRows does AutoScroll take over instead.
         int initialRows = Math.Min(_filters.Count + 1, FilterMaxRows);
-        _filterPanel = new Panel
+        _filterPanel = new NoAutoScrollPanel
         {
             Left        = pad, Top = y, Width = FilterPanelWidth,
             Height      = initialRows * FilterRowHeight + 8,
@@ -340,7 +344,7 @@ public class MainForm : Form
         y += 44;
 
         // --- Status bar ---
-        var statusPanel = new Panel
+        _statusPanel = new Panel
         {
             Left      = pad, Top = y, Width = FilterPanelWidth, Height = 28,
             BackColor = Color.FromArgb(40, 40, 40)
@@ -357,9 +361,9 @@ public class MainForm : Form
             ForeColor = Color.Silver,
             Text      = "Not running"
         };
-        statusPanel.Controls.Add(_statusDot);
-        statusPanel.Controls.Add(_statusLabel);
-        Controls.Add(statusPanel);
+        _statusPanel.Controls.Add(_statusDot);
+        _statusPanel.Controls.Add(_statusLabel);
+        Controls.Add(_statusPanel);
         y += 32;
 
         // --- Log header: label + on/off toggle (the header stays visible when the log is off) ---
@@ -452,6 +456,17 @@ public class MainForm : Form
     /// </summary>
     private void RebuildFilterRows()
     {
+        // Reset scroll to the top before anything else. WinForms scrolls a ScrollableControl
+        // by shifting each child control's actual position relative to whatever the scroll
+        // offset is at that moment, not by recomputing it fresh from Top every time. Every
+        // previous fix reset the scroll only after the new rows were already added below,
+        // which was too late once the panel had been scrolled down: the new rows inherited
+        // that offset the moment they were added, and later resetting AutoScrollPosition
+        // could only move the whole (already skewed) set again, not correct it. Doing the
+        // reset first, while the panel is still in its old, valid state, means every row
+        // added below starts from a known, unshifted origin.
+        _filterPanel.AutoScrollPosition = Point.Empty;
+
         _filterPanel.SuspendLayout();
 
         // Dispose and clear previous rows (Controls.Clear alone would not dispose them).
@@ -540,14 +555,66 @@ public class MainForm : Form
             }
         }
 
+        // Resume before touching AutoScrollMinSize: its setter only takes effect through an
+        // internal PerformLayout call, which silently does nothing while layout is suspended.
+        // Doing the Size.Empty-then-real-value reset below while still suspended (as tried
+        // before) meant the first assignment never actually ran a layout pass before being
+        // overwritten by the second, so the stale, larger scroll range from an earlier scroll
+        // never actually got dropped. Both assignments need an active layout pass to stick.
+        _filterPanel.ResumeLayout(true);
+
         // Match the scrollable area to the exact row height so the list never shows a
         // phantom empty row (a spurious scrollbar caused by control margins) and scrolls in
-        // whole-row steps. Show the top after a rebuild.
+        // whole-row steps. Zeroing it first matters once the panel has actually scrolled:
+        // WinForms keeps the larger internal scroll range from before if AutoScrollMinSize is
+        // simply set smaller, so the effective scrollable area never shrinks back on its own.
+        _filterPanel.AutoScrollMinSize = Size.Empty;
         _filterPanel.AutoScrollMinSize = new Size(0, topPad + _filters.Count * FilterRowHeight);
-
-        _filterPanel.ResumeLayout();
         _filterPanel.AutoScrollPosition = Point.Empty;
+
+        ResizeFilterPanel();
         UpdateToggleAllLabel();
+    }
+
+    /// <summary>
+    /// Recomputes the filter panel's visible height to fit the current filter count, capped at
+    /// FilterMaxRows (past that, AutoScroll takes over instead of growing further), then shifts
+    /// every control below the panel and resizes the window by the same amount so the layout
+    /// always stays compact with no leftover empty area after removing filters. Skipped during
+    /// the very first call from BuildUI, before the rest of the window exists to shift; that
+    /// initial height is already set correctly there.
+    /// Called at the end of RebuildFilterRows.
+    /// </summary>
+    private void ResizeFilterPanel()
+    {
+        if (_btnStart == null)
+            return;
+
+        int visibleRows = Math.Min(_filters.Count + 1, FilterMaxRows);
+        int newHeight   = visibleRows * FilterRowHeight + 8;
+        int delta       = newHeight - _filterPanel.Height;
+        if (delta == 0)
+            return;
+
+        SuspendLayout();
+
+        int oldBottom = _filterPanel.Top + _filterPanel.Height;
+        _filterPanel.Height = newHeight;
+
+        foreach (Control c in Controls)
+        {
+            if (c != _filterPanel && c.Top >= oldBottom)
+                c.Top += delta;
+        }
+
+        _logViewTop     += delta;
+        _formHeightBase += delta;
+
+        int height  = _formHeightBase + (_logEnabled ? LogSectionHeight : 0);
+        MinimumSize = new Size(480, height);
+        Size        = new Size(480, height);
+
+        ResumeLayout();
     }
 
     /// <summary>
@@ -1133,6 +1200,21 @@ public class MainForm : Form
         }
         catch (ObjectDisposedException) { }
         catch (InvalidOperationException) { }
+    }
+
+    // -----------------------------------------------------------------------------
+    // NoAutoScrollPanel - plain Panel that never auto-scrolls to whichever child control
+    // gains focus. ScrollableControl does this by default on every focus change (see
+    // ScrollToControl); when a row's Remove button is clicked, RebuildFilterRows disposes
+    // it as part of tearing down the old rows, and WinForms then hands focus to some other
+    // control inside the panel and scrolls it into view. That happened after the
+    // AutoScrollPosition reset at the end of RebuildFilterRows, silently overriding it,
+    // which is what made the list jump and show blank space above the remaining rows.
+    // Used for _filterPanel only.
+    // -----------------------------------------------------------------------------
+    private sealed class NoAutoScrollPanel : Panel
+    {
+        protected override Point ScrollToControl(Control activeControl) => AutoScrollPosition;
     }
 
     // -----------------------------------------------------------------------------
